@@ -1,0 +1,46 @@
+###################################
+# GETTING STARTED WITH PRE-COMMIT #
+###################################
+# To start using this pre-commit file instapp pre-commit:
+#   pip install pre-commit
+# Install hooks:
+#   pre-commit install
+# Note:  Multiple changes to the same file by a hook will block git commits.
+#    Therefore hooks should be added one at a time.
+# Apply to all files without commiting:
+#   pre-commit run --all-files
+# For more info, see https://pre-commit.com/
+
+##########
+# UPDATE #
+##########
+# Update this file (will change version numbers of tools, which could lead to
+# simultaneous changes that require manual resolution):
+#   pre-commit autoupdate
+
+#############
+# CUSTOMIZE #
+#############
+# To customize per-hook behavior you can use:
+#  1) the `args` option to pass cli args to the tool
+#  2) per-tool config files such as mypy.ini, .pylintrc etc in repo root
+#  3) the shared config file pyproject.toml in repo root
+
+#############
+# UNINSTALL #
+#############
+# pre-commit uninstall
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-json
+      - id: check-yaml
+      - id: check-toml
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.14
+    hooks:
+      - id: ruff
+        args: [--fix, --unsafe-fixes, --exit-non-zero-on-fix]
+      - id: ruff-format

@@ -1,0 +1,52 @@
+[project]
+name = "tfm-embed-predict"
+version = "0.0.0"
+requires-python = ">=3.10"
+dependencies = [
+"cellxgene_census", "scikit-learn", "matplotlib", "seaborn", "scipy", "scanpy", "anndata", "pandas"
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+extend-include = ["*.ipynb"]
+
+[tool.ruff.lint]
+# Activate all the rules that are pyupgrade-related
+select = [
+  "UP",   # pyupgrade
+  "D",    # pydocstyle
+  "PT",   # pytest style checking
+  "C4",   # comprehensions style checking
+  "PD",   # pandas style checking
+  "F",    # pyflakes: is-literal
+  "W605", # pycodestyle: invalid-escape-sequence
+  "I",    # isort
+]
+# On top of the Google convention, disable `D417`, which requires
+# documentation for every function parameter.
+ignore = [
+  "D100",  # pydocstyle: Missing module docstring
+  "D101",  # pydocstyle: Missing module-level docstring
+  "D102",  # pydocstyle: Missing docstring in public module
+  "D103",  # pydocstyle: Missing class docstring
+  "D105",  # pydocstyle: Missing docstring in magic method
+  "D107",  # pydocstyle: Missing parameter descriptions in the docstring
+  "D203",  # pydocstyle: 1 blank line required before class docstring
+  "D205",  # pydocstyle: 1 blank line required between summary line and description
+  "D212",  # pydocstyle: Multi-line docstring summary should start at the first line
+  "D401",  # pydocstyle: First line should be in imperative mood
+  "D417",  # pydocstyle: Missing argument descriptions in the docstring
+  "F841",  # flake8: unused variable
+  "PD003", # .isna is preferred to .isnull (both work fine)
+  "PD010", # .pivot_table vs .pivot/.unstack (both work fine)
+  "PD011", # pandas do not use .values (false positives causing bugs in torch code)
+  "PD015", # Use .merge method instead of pd.merge function. They have equivalent functionality.
+  "PT011", #TODO remove
+  "PT028", # Test function parameter has default argument (not actual test functions)
+  "D400",  # docstring punctuation
+  "D415",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["I001"]
