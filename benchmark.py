@@ -7,6 +7,7 @@ Main entry point: run_predictions() - handles CV loop and returns results DataFr
 import logging
 import warnings
 
+import numpy as np
 import pandas as pd
 from scipy import sparse
 from sklearn.decomposition import TruncatedSVD
@@ -285,12 +286,28 @@ def run_predictions(
 
                 # Predict
                 y_pred = clf.predict(X_test)
-                y_proba = clf.predict_proba(X_test)
 
-                # Compute metrics
+                # Try to get probabilities (can fail with numerical issues in multiclass)
+                try:
+                    y_proba = clf.predict_proba(X_test)
+                    # Check for NaN in probabilities
+                    if np.isnan(y_proba).any():
+                        logger.warning(
+                            f"  {rep_name} in {fold_name}: predict_proba produced NaN, "
+                            "falling back to predict-only metrics"
+                        )
+                        y_proba = None
+                except (ValueError, RuntimeWarning) as e:
+                    logger.warning(
+                        f"  {rep_name} in {fold_name}: predict_proba failed ({e}), "
+                        "using predict-only metrics"
+                    )
+                    y_proba = None
+
+                # Compute metrics (handle case where probabilities unavailable)
                 cell_metrics = compute_metrics(y_test, y_proba, y_pred, clf.classes_)
                 donor_metrics = compute_donor_metrics(
-                    y_test, y_proba, donors_test, clf.classes_
+                    y_test, y_pred, donors_test, clf.classes_
                 )
 
                 results.append(

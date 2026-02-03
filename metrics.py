@@ -25,7 +25,7 @@ from sklearn.metrics import (
 
 def compute_metrics(
     y_true: np.ndarray,
-    y_pred_proba: np.ndarray,
+    y_pred_proba: np.ndarray | None,
     y_pred_class: np.ndarray,
     clf_classes: np.ndarray,
 ) -> dict[str, float]:
@@ -37,7 +37,7 @@ def compute_metrics(
 
     Args:
         y_true: True labels (original label space)
-        y_pred_proba: Predicted probabilities (n_samples × n_classes)
+        y_pred_proba: Predicted probabilities (n_samples × n_classes), or None if unavailable
         y_pred_class: Predicted class labels (in classifier's label space)
         clf_classes: Classes known to the classifier
 
@@ -75,8 +75,11 @@ def compute_metrics(
 
     # Filter to only known labels
     y_true_filtered = y_true[known_mask]
-    y_pred_proba_filtered = y_pred_proba[known_mask]
     y_pred_class_filtered = y_pred_class[known_mask]
+    if y_pred_proba is not None:
+        y_pred_proba_filtered = y_pred_proba[known_mask]
+    else:
+        y_pred_proba_filtered = None
 
     y_true_idx = np.array([label_map[y] for y in y_true_filtered])
 
@@ -93,6 +96,7 @@ def compute_metrics(
             "metric_error": "single_class_after_filtering",
         }
 
+    # Base metrics (don't need probabilities)
     metrics = {
         "balanced_acc": float(
             balanced_accuracy_score(y_true_idx, y_pred_class_filtered)
@@ -103,40 +107,58 @@ def compute_metrics(
                 y_true_idx, y_pred_class_filtered, average="macro", zero_division=0
             )
         ),
-        "log_loss": float(
-            log_loss(
-                y_true_idx, y_pred_proba_filtered, labels=list(range(len(clf_classes)))
-            )
-        ),
         "n_unknown_labels": int(n_unknown),
         "n_valid_test_samples": int(n_valid),
     }
 
-    n_classes = len(clf_classes)
-    if n_classes == 2:
-        metrics["AUROC"] = float(roc_auc_score(y_true_idx, y_pred_proba_filtered[:, 1]))
-        metrics["AUPRC"] = float(
-            average_precision_score(y_true_idx, y_pred_proba_filtered[:, 1])
-        )
-    else:
+    # Probability-based metrics (only if probabilities available)
+    if y_pred_proba_filtered is not None:
         try:
-            metrics["AUROC_ovr"] = float(
-                roc_auc_score(
+            metrics["log_loss"] = float(
+                log_loss(
                     y_true_idx,
                     y_pred_proba_filtered,
-                    multi_class="ovr",
-                    average="macro",
+                    labels=list(range(len(clf_classes))),
                 )
             )
-        except ValueError:
-            metrics["AUROC_ovr"] = np.nan
+        except (ValueError, RuntimeWarning):
+            metrics["log_loss"] = np.nan
+
+        n_classes = len(clf_classes)
+        if n_classes == 2:
+            try:
+                metrics["AUROC"] = float(
+                    roc_auc_score(y_true_idx, y_pred_proba_filtered[:, 1])
+                )
+                metrics["AUPRC"] = float(
+                    average_precision_score(y_true_idx, y_pred_proba_filtered[:, 1])
+                )
+            except (ValueError, RuntimeWarning):
+                metrics["AUROC"] = np.nan
+                metrics["AUPRC"] = np.nan
+        else:
+            try:
+                metrics["AUROC_ovr"] = float(
+                    roc_auc_score(
+                        y_true_idx,
+                        y_pred_proba_filtered,
+                        multi_class="ovr",
+                        average="macro",
+                    )
+                )
+            except (ValueError, RuntimeWarning):
+                metrics["AUROC_ovr"] = np.nan
+    else:
+        # No probabilities available
+        metrics["log_loss"] = np.nan
+        metrics["proba_unavailable"] = True
 
     return metrics
 
 
 def compute_donor_metrics(
     y_true: np.ndarray,
-    y_pred_proba: np.ndarray,
+    y_pred: np.ndarray,
     donors: np.ndarray,
     clf_classes: np.ndarray,
 ) -> dict[str, float]:
@@ -150,7 +172,7 @@ def compute_donor_metrics(
 
     Args:
         y_true: True labels (cell-level)
-        y_pred_proba: Predicted probabilities (cell-level)
+        y_pred: Predicted class labels (cell-level)
         donors: Donor IDs for each cell
         clf_classes: Classes known to the classifier
 
@@ -165,7 +187,7 @@ def compute_donor_metrics(
             {
                 "donor": donors,
                 "y_true": y_true,
-                "y_pred": clf_classes[np.argmax(y_pred_proba, axis=1)],
+                "y_pred": y_pred,
             }
         )
 
