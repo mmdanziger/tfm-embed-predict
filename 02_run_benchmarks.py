@@ -20,7 +20,6 @@ import multiprocessing as mp
 import os
 import shutil
 import threading
-import time
 import traceback
 import uuid
 import warnings
@@ -39,19 +38,8 @@ from tqdm.auto import tqdm
 # Will be set from args
 FETCH_SEMAPHORE = None
 
-from sklearn.decomposition import TruncatedSVD
-from sklearn.linear_model import SGDClassifier
-from sklearn.metrics import (
-    average_precision_score,
-    balanced_accuracy_score,
-    f1_score,
-    log_loss,
-    matthews_corrcoef,
-    roc_auc_score,
-)
-from sklearn.model_selection import StratifiedGroupKFold
-from sklearn.preprocessing import MaxAbsScaler, StandardScaler
-from sklearn.random_projection import SparseRandomProjection
+
+from preprocessing import sparse_normalize_log1p
 
 
 def setup_logging(log_file: str) -> logging.Logger:
@@ -88,18 +76,6 @@ def get_cache_filename(dataset_id: str, cell_type: str) -> str:
     """Create safe filename for cache."""
     safe_ct = cell_type.replace(" ", "_").replace("/", "_").replace(":", "_")
     return f"{dataset_id}_{safe_ct}.h5ad"
-
-
-def sparse_normalize_log1p(
-    X: sparse.csr_matrix, target_sum: float = 1e4
-) -> sparse.csr_matrix:
-    """Library-size normalize and log1p transform sparse matrix."""
-    X = X.tocsr().copy()
-    counts = np.array(X.sum(axis=1)).flatten()
-    counts[counts == 0] = 1
-    X = sparse.diags(target_sum / counts) @ X
-    X.data = np.log1p(X.data)
-    return X
 
 
 def validate_task_feasibility(
@@ -225,144 +201,6 @@ def fetch_single_task_with_census(
 # =============================================================================
 
 
-def compute_metrics(
-    y_true: np.ndarray,
-    y_pred: np.ndarray,
-    y_pred_proba: np.ndarray | None,
-    clf_classes: np.ndarray,
-) -> dict[str, float]:
-    """Compute classification metrics. Compatible with original output."""
-    label_map = {c: i for i, c in enumerate(clf_classes)}
-
-    # Handle unknown labels in test set
-    known_mask = np.array([y in label_map for y in y_true])
-    n_unknown = (~known_mask).sum()
-    n_valid = known_mask.sum()
-
-    if n_valid < 2:
-        return {
-            "balanced_acc": np.nan,
-            "MCC": np.nan,
-            "F1_macro": np.nan,
-            "log_loss": np.nan,
-            "n_unknown_labels": int(n_unknown),
-            "n_valid_test_samples": int(n_valid),
-            "metric_error": "insufficient_valid_samples",
-        }
-
-    y_true_f = y_true[known_mask]
-    y_pred_f = y_pred[known_mask]
-    y_true_idx = np.array([label_map[y] for y in y_true_f])
-    y_pred_idx = np.array([label_map[y] for y in y_pred_f])
-
-    if len(np.unique(y_true_idx)) < 2:
-        return {
-            "balanced_acc": np.nan,
-            "MCC": np.nan,
-            "F1_macro": np.nan,
-            "log_loss": np.nan,
-            "n_unknown_labels": int(n_unknown),
-            "n_valid_test_samples": int(n_valid),
-            "metric_error": "single_class_after_filtering",
-        }
-
-    metrics = {
-        "balanced_acc": float(balanced_accuracy_score(y_true_idx, y_pred_idx)),
-        "MCC": float(matthews_corrcoef(y_true_idx, y_pred_idx)),
-        "F1_macro": float(
-            f1_score(y_true_idx, y_pred_idx, average="macro", zero_division=0)
-        ),
-        "n_unknown_labels": int(n_unknown),
-        "n_valid_test_samples": int(n_valid),
-    }
-
-    # Log loss and AUROC only if we have valid probabilities
-    if y_pred_proba is not None:
-        y_pred_proba_f = y_pred_proba[known_mask]
-        try:
-            metrics["log_loss"] = float(
-                log_loss(
-                    y_true_idx, y_pred_proba_f, labels=list(range(len(clf_classes)))
-                )
-            )
-        except Exception:
-            metrics["log_loss"] = np.nan
-
-        n_classes = len(clf_classes)
-        if n_classes == 2:
-            try:
-                metrics["AUROC"] = float(
-                    roc_auc_score(y_true_idx, y_pred_proba_f[:, 1])
-                )
-                metrics["AUPRC"] = float(
-                    average_precision_score(y_true_idx, y_pred_proba_f[:, 1])
-                )
-            except Exception:
-                pass
-        else:
-            try:
-                metrics["AUROC_ovr"] = float(
-                    roc_auc_score(
-                        y_true_idx, y_pred_proba_f, multi_class="ovr", average="macro"
-                    )
-                )
-            except Exception:
-                pass
-    else:
-        metrics["log_loss"] = np.nan
-
-    return metrics
-
-
-def compute_donor_metrics(
-    y_true: np.ndarray,
-    y_pred: np.ndarray,
-    donors: np.ndarray,
-    clf_classes: np.ndarray,
-) -> dict[str, float]:
-    """Aggregate to donor level via majority vote."""
-    try:
-        label_map = {c: i for i, c in enumerate(clf_classes)}
-
-        df = pd.DataFrame({"donor": donors, "y_true": y_true, "y_pred": y_pred})
-        df = df[
-            df["y_true"].isin(label_map.keys()) & df["y_pred"].isin(label_map.keys())
-        ]
-
-        if len(df) < 2:
-            return {"donor_metric_error": "insufficient_samples"}
-
-        agg = df.groupby("donor", observed=True).agg(
-            y_true_donor=(
-                "y_true",
-                lambda x: x.mode().iloc[0] if len(x.mode()) > 0 else x.iloc[0],
-            ),
-            y_pred_donor=(
-                "y_pred",
-                lambda x: x.mode().iloc[0] if len(x.mode()) > 0 else x.iloc[0],
-            ),
-        )
-
-        y_true_idx = np.array([label_map[y] for y in agg["y_true_donor"]])
-        y_pred_idx = np.array([label_map[y] for y in agg["y_pred_donor"]])
-
-        if len(np.unique(y_true_idx)) < 2:
-            return {"donor_metric_error": "single_class", "n_valid_donors": len(agg)}
-
-        return {
-            "balanced_acc_donor": float(
-                balanced_accuracy_score(y_true_idx, y_pred_idx)
-            ),
-            "MCC_donor": float(matthews_corrcoef(y_true_idx, y_pred_idx)),
-            "F1_macro_donor": float(
-                f1_score(y_true_idx, y_pred_idx, average="macro", zero_division=0)
-            ),
-            "n_valid_donors": len(agg),
-        }
-    except Exception as e:
-        return {"donor_metric_error": str(e)}
-
-
 def run_single_task(args_tuple) -> list[dict]:
     """Run CV benchmark on a single cached task. Returns list of result dicts."""
     cache_path, embedding_keys, n_splits, alpha, pca_components, random_state = (
@@ -370,28 +208,19 @@ def run_single_task(args_tuple) -> list[dict]:
     )
 
     try:
-        # Load cached data
+        import time
+
+        from benchmark import build_representations, run_predictions
+
+        # Load cached data (already preprocessed!)
         adata = sc.read_h5ad(cache_path)
 
         dataset_id = adata.obs["dataset_id"].iloc[0]
         cell_type = adata.obs["cell_type"].iloc[0]
-        task_id = get_task_id(dataset_id, cell_type)
+        n_genes = adata.X.shape[1]
 
-        y = adata.obs["disease"].astype(str).values
+        # Check if we have enough donors for CV
         donors = adata.obs["donor_id"].astype(str).values
-
-        X_lognorm = (
-            sparse.csr_matrix(adata.X)
-            if not sparse.issparse(adata.X)
-            else adata.X.tocsr()
-        )
-        n_genes = X_lognorm.shape[1]
-
-        embeddings = {
-            k: np.asarray(adata.obsm[k]) for k in embedding_keys if k in adata.obsm
-        }
-
-        # Setup CV
         n_donors = len(np.unique(donors))
         k_folds = min(n_splits, n_donors)
 
@@ -404,145 +233,30 @@ def run_single_task(args_tuple) -> list[dict]:
                 }
             ]
 
-        sgkf = StratifiedGroupKFold(
-            n_splits=k_folds, shuffle=True, random_state=random_state
+        # Build representations (raw, PCA, embeddings)
+        representations = build_representations(adata, embedding_keys=embedding_keys)
+
+        # Run benchmark using unified implementation
+        t0 = time.perf_counter()
+        results_df = run_predictions(
+            adata,
+            label_col="disease",
+            representations=representations,
+            n_folds=k_folds,
+            alpha=alpha,
+            random_state=random_state,
+            preprocess=False,  # Data already preprocessed in cache!
+            dataset_id=dataset_id,
+            cell_type=cell_type,
+            n_genes=n_genes,
         )
-        results = []
 
-        for fold_i, (train_idx, test_idx) in enumerate(
-            sgkf.split(X_lognorm, y, groups=donors)
-        ):
-            y_train, y_test = y[train_idx], y[test_idx]
-            donors_train, donors_test = donors[train_idx], donors[test_idx]
+        # Convert DataFrame to list of dicts for compatibility
+        results = results_df.to_dict(orient="records")
 
-            n_train_classes = len(np.unique(y_train))
-            n_test_classes = len(np.unique(y_test))
-
-            if n_train_classes < 2 or n_test_classes < 2:
-                continue
-
-            X_train_ln = X_lognorm[train_idx]
-            X_test_ln = X_lognorm[test_idx]
-
-            # Build feature sets
-            features = []
-
-            # 1. Raw lognorm with MaxAbsScaler (preserves sparsity)
-            scaler = MaxAbsScaler()
-            features.append(
-                (
-                    "raw_lognorm",
-                    scaler.fit_transform(X_train_ln),
-                    scaler.transform(X_test_ln),
-                )
-            )
-
-            # 2. PCA
-            n_pca = min(
-                pca_components, X_train_ln.shape[1] - 1, X_train_ln.shape[0] - 1
-            )
-            if n_pca >= 2:
-                pca = TruncatedSVD(n_components=n_pca, random_state=random_state)
-                X_tr_pca = pca.fit_transform(X_train_ln)
-                X_te_pca = pca.transform(X_test_ln)
-                scaler_pca = StandardScaler()
-                features.append(
-                    (
-                        "raw_pca50",
-                        scaler_pca.fit_transform(X_tr_pca),
-                        scaler_pca.transform(X_te_pca),
-                    )
-                )
-
-            # 3. Random projection (sanity check)
-            rp = SparseRandomProjection(
-                n_components=pca_components,
-                dense_output=True,
-                random_state=random_state,
-            )
-            rp.fit(X_train_ln[:1].astype(np.float64))
-            X_tr_rp = rp.transform(X_train_ln.astype(np.float64))
-            X_te_rp = rp.transform(X_test_ln.astype(np.float64))
-            scaler_rp = StandardScaler()
-            features.append(
-                (
-                    "random_proj50",
-                    scaler_rp.fit_transform(X_tr_rp),
-                    scaler_rp.transform(X_te_rp),
-                )
-            )
-
-            # 4+. Embeddings
-            for emb_name, emb_data in embeddings.items():
-                scaler_emb = StandardScaler()
-                X_tr_emb = scaler_emb.fit_transform(emb_data[train_idx])
-                X_te_emb = scaler_emb.transform(emb_data[test_idx])
-                features.append((f"obsm[{emb_name}]", X_tr_emb, X_te_emb))
-
-            # Run classifier on each feature
-            for feat_name, X_tr, X_te in features:
-                t0 = time.perf_counter()
-
-                clf = SGDClassifier(
-                    loss="log_loss",
-                    penalty="l2",
-                    alpha=alpha,
-                    class_weight="balanced",
-                    max_iter=2000,
-                    tol=1e-3,
-                    early_stopping=False,
-                    average=True,
-                    random_state=random_state,
-                )
-                clf.fit(X_tr, y_train)
-
-                # Get predictions
-                y_pred = clf.predict(X_te)
-
-                # Try to get probabilities, handle NaN gracefully
-                y_pred_proba = None
-                n_nan = 0
-                try:
-                    y_pred_proba = clf.predict_proba(X_te)
-                    nan_mask = ~np.isfinite(y_pred_proba).all(axis=1)
-                    n_nan = nan_mask.sum()
-                    if n_nan > 0:
-                        # Fix NaN rows with one-hot from hard prediction
-                        for i in np.where(nan_mask)[0]:
-                            y_pred_proba[i, :] = 0.0
-                            pred_class = y_pred[i]
-                            if pred_class in clf.classes_:
-                                y_pred_proba[
-                                    i, np.where(clf.classes_ == pred_class)[0][0]
-                                ] = 1.0
-                except Exception:
-                    pass
-
-                # Compute metrics
-                metrics = compute_metrics(y_test, y_pred, y_pred_proba, clf.classes_)
-                donor_metrics = compute_donor_metrics(
-                    y_test, y_pred, donors_test, clf.classes_
-                )
-
-                results.append(
-                    {
-                        "dataset_id": dataset_id,
-                        "cell_type": cell_type,
-                        "fold": fold_i,
-                        "feature": feat_name,
-                        "n_genes": n_genes,
-                        "n_train_cells": len(y_train),
-                        "n_test_cells": len(y_test),
-                        "n_train_donors": len(np.unique(donors_train)),
-                        "n_test_donors": len(np.unique(donors_test)),
-                        "n_train_classes": n_train_classes,
-                        "n_test_classes": n_test_classes,
-                        "n_nan_predictions": n_nan,
-                        "elapsed_s": time.perf_counter() - t0,
-                        **metrics,
-                        **donor_metrics,
-                    }
-                )
+        # Rename 'representation' column to 'feature' for backward compatibility
+        for r in results:
+            r["feature"] = r.pop("representation")
 
         if not results:
             return [
