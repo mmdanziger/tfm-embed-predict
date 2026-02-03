@@ -5,6 +5,7 @@ Main entry point: run_predictions() - handles CV loop and returns results DataFr
 """
 
 import logging
+import warnings
 
 import pandas as pd
 from scipy import sparse
@@ -14,6 +15,98 @@ from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.preprocessing import MaxAbsScaler, StandardScaler
 
 from metrics import compute_donor_metrics, compute_metrics
+
+# =============================================================================
+# Logging Setup
+# =============================================================================
+
+
+def setup_logging(
+    log_file: str,
+    logger_name: str = "benchmark",
+    include_console: bool = True,
+    console_level: int = logging.INFO,
+    include_thread_name: bool = False,
+    filter_warnings: bool = False,
+) -> logging.Logger:
+    """
+    Configure logging for benchmark runs.
+
+    Parameters
+    ----------
+    log_file : str
+        Path to log file
+    logger_name : str, default="benchmark"
+        Name of the logger to configure
+    include_console : bool, default=True
+        Whether to add console handler
+    console_level : int, default=logging.INFO
+        Logging level for console handler
+    include_thread_name : bool, default=False
+        Whether to include thread name in file log format
+    filter_warnings : bool, default=False
+        Whether to filter RuntimeWarning and UserWarning
+
+    Returns
+    -------
+    logging.Logger
+        Configured logger instance
+
+    """
+    logging.captureWarnings(True)
+    logger = logging.getLogger(logger_name)
+    logger.setLevel(logging.INFO)
+    logger.handlers = []
+    logger.propagate = False
+
+    # File handler
+    fh = logging.FileHandler(log_file, mode="a", encoding="utf-8")
+    if include_thread_name:
+        fh.setFormatter(
+            logging.Formatter(
+                "%(asctime)s | %(levelname)-7s | %(threadName)-15s | %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+        )
+    else:
+        fh.setFormatter(
+            logging.Formatter(
+                "%(asctime)s | %(levelname)-7s | %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+        )
+    logger.addHandler(fh)
+
+    # Console handler
+    if include_console:
+        ch = logging.StreamHandler()
+        ch.setLevel(console_level)
+        if console_level == logging.INFO:
+            ch.setFormatter(
+                logging.Formatter("%(asctime)s | %(message)s", datefmt="%H:%M:%S")
+            )
+        else:
+            ch.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+        logger.addHandler(ch)
+
+    # Warning filters
+    if filter_warnings:
+        warnings.filterwarnings("ignore", category=RuntimeWarning)
+        warnings.filterwarnings("ignore", category=UserWarning)
+    else:
+        warnings.filterwarnings("ignore")
+
+    # Special handling for py.warnings logger (used in 04_run_celltype_benchmark.py)
+    if include_thread_name:
+        warnings_logger = logging.getLogger("py.warnings")
+        warnings_logger.setLevel(logging.WARNING)
+        warnings_logger.handlers = []
+        warnings_logger.propagate = False
+        warnings_logger.addHandler(fh)
+
+    return logger
+
+
 from preprocessing import preprocess_counts
 
 # =============================================================================

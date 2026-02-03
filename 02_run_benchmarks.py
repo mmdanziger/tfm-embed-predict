@@ -22,7 +22,6 @@ import shutil
 import threading
 import traceback
 import uuid
-import warnings
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -39,32 +38,8 @@ from tqdm.auto import tqdm
 FETCH_SEMAPHORE = None
 
 
+from benchmark import setup_logging
 from preprocessing import sparse_normalize_log1p
-
-
-def setup_logging(log_file: str) -> logging.Logger:
-    """Configure logging."""
-    logging.captureWarnings(True)
-    logger = logging.getLogger("benchmark")
-    logger.setLevel(logging.INFO)
-    logger.handlers = []
-    logger.propagate = False
-
-    fh = logging.FileHandler(log_file, mode="a", encoding="utf-8")
-    fh.setFormatter(
-        logging.Formatter(
-            "%(asctime)s | %(levelname)-7s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
-        )
-    )
-    logger.addHandler(fh)
-
-    ch = logging.StreamHandler()
-    ch.setLevel(logging.INFO)
-    ch.setFormatter(logging.Formatter("%(asctime)s | %(message)s", datefmt="%H:%M:%S"))
-    logger.addHandler(ch)
-
-    warnings.filterwarnings("ignore")
-    return logger
 
 
 def get_task_id(dataset_id: str, cell_type: str) -> str:

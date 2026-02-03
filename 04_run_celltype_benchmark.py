@@ -25,7 +25,6 @@ import shutil
 import threading
 import traceback
 import uuid
-import warnings
 from pathlib import Path
 
 import cellxgene_census
@@ -35,6 +34,7 @@ import scanpy as sc
 from scipy import sparse
 from tqdm.auto import tqdm
 
+from benchmark import setup_logging
 from preprocessing import sparse_normalize_log1p
 
 # =============================================================================
@@ -42,49 +42,6 @@ from preprocessing import sparse_normalize_log1p
 # TileDB creates contexts internally when fetching embeddings, causing exhaustion
 # =============================================================================
 CENSUS_SEMAPHORE = threading.Semaphore(2)
-
-
-def setup_logging(log_file: str) -> logging.Logger:
-    """Configures thread-safe logger for file output and captures warnings."""
-    logging.captureWarnings(True)
-
-    logger = logging.getLogger("benchmark")
-    logger.setLevel(logging.INFO)
-    logger.handlers = []
-    logger.propagate = False
-
-    fh = logging.FileHandler(log_file, mode="a", encoding="utf-8")
-    fh.setFormatter(
-        logging.Formatter(
-            "%(asctime)s | %(levelname)-7s | %(threadName)-15s | %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        )
-    )
-    logger.addHandler(fh)
-
-    # Console handler for warnings/errors
-    ch = logging.StreamHandler()
-    ch.setLevel(logging.WARNING)
-    ch.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
-    logger.addHandler(ch)
-
-    warnings_logger = logging.getLogger("py.warnings")
-    warnings_logger.setLevel(logging.WARNING)
-    warnings_logger.handlers = []
-    warnings_logger.propagate = False
-    warnings_logger.addHandler(fh)
-
-    warnings.filterwarnings(
-        "ignore", category=RuntimeWarning, message="invalid value encountered in divide"
-    )
-    warnings.filterwarnings(
-        "ignore", category=UserWarning, message="y_pred contains classes not in y_true"
-    )
-    warnings.filterwarnings(
-        "ignore", category=UserWarning, message="Transforming to str index"
-    )
-
-    return logger
 
 
 def log_resources(logger: logging.Logger, message: str) -> None:
@@ -579,7 +536,14 @@ def run_benchmarks(
 
     Supports checkpoint/resume: if temp directory exists, skips completed tasks.
     """
-    logger = setup_logging(log_file)
+    logger = setup_logging(
+        log_file,
+        logger_name="benchmark",
+        include_console=True,
+        console_level=logging.WARNING,
+        include_thread_name=True,
+        filter_warnings=False,
+    )
 
     # Load cell type manifest
     tasks_df = pd.read_parquet(celltype_manifest_path)

@@ -12,7 +12,6 @@ Main functions:
 
 import argparse
 import logging
-import warnings
 
 import numpy as np
 import pandas as pd
@@ -20,35 +19,8 @@ import scanpy as sc
 from anndata import AnnData
 from scipy import sparse
 
-from benchmark import build_representations, run_predictions
+from benchmark import build_representations, run_predictions, setup_logging
 from preprocessing import preprocess_counts
-
-
-def setup_logging(log_file: str) -> logging.Logger:
-    """Configure logging for benchmark runs."""
-    logging.captureWarnings(True)
-    logger = logging.getLogger("pseudobulk")
-    logger.setLevel(logging.INFO)
-    logger.handlers = []
-    logger.propagate = False
-
-    fh = logging.FileHandler(log_file, mode="a", encoding="utf-8")
-    fh.setFormatter(
-        logging.Formatter(
-            "%(asctime)s | %(levelname)-7s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
-        )
-    )
-    logger.addHandler(fh)
-
-    ch = logging.StreamHandler()
-    ch.setLevel(logging.INFO)
-    ch.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
-    logger.addHandler(ch)
-
-    warnings.filterwarnings("ignore", category=RuntimeWarning)
-    warnings.filterwarnings("ignore", category=UserWarning)
-
-    return logger
 
 
 def create_pseudobulk_adata(
@@ -242,7 +214,14 @@ def main():
     args = ap.parse_args()
 
     # Setup
-    logger = setup_logging(args.log_file)
+    logger = setup_logging(
+        args.log_file,
+        logger_name="pseudobulk",
+        include_console=True,
+        console_level=logging.INFO,
+        include_thread_name=False,
+        filter_warnings=True,
+    )
     logger.info("=" * 80)
     logger.info("PSEUDOBULK BENCHMARK STARTED")
     logger.info(f"  Data: {args.adata_path}")
