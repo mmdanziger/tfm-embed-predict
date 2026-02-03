@@ -50,7 +50,7 @@ def plot_low_data_performance(results_df, feature_types=None, figsize=(20, 5)):
             
             # Group by N and compute statistics across folds and bootstraps
             # Strategy: For each N, we have (n_folds × n_bootstrap) measurements
-            grouped = feature_df.groupby("N")[metric].agg([
+            grouped = feature_df.groupby("n_per_class")[metric].agg([
                 ("mean", "mean"),
                 ("std", "std"),
                 ("sem", lambda x: x.std() / np.sqrt(len(x))),  # Standard error
@@ -58,9 +58,9 @@ def plot_low_data_performance(results_df, feature_types=None, figsize=(20, 5)):
             ]).reset_index()
             
             # Sort by N
-            grouped = grouped.sort_values("N")
+            grouped = grouped.sort_values("n_per_class")
             
-            N_values = grouped["N"].values
+            N_values = grouped["n_per_class"].values
             means = grouped["mean"].values
             stds = grouped["std"].values
             sems = grouped["sem"].values
@@ -147,15 +147,15 @@ def plot_low_data_performance_detailed(results_df, feature_types=None,
         for feature_type in feature_types:
             feature_df = df[df["feature_type"] == feature_type].copy()
             
-            grouped = feature_df.groupby("N")[metric].agg([
+            grouped = feature_df.groupby("n_per_class")[metric].agg([
                 ("mean", "mean"),
                 ("std", "std"),
                 ("sem", lambda x: x.std() / np.sqrt(len(x))),
             ]).reset_index()
             
-            grouped = grouped.sort_values("N")
+            grouped = grouped.sort_values("n_per_class")
             
-            N_values = grouped["N"].values
+            N_values = grouped["n_per_class"].values
             means = grouped["mean"].values
             
             # Choose error type
@@ -198,15 +198,15 @@ def plot_low_data_performance_detailed(results_df, feature_types=None,
         for feature_type in feature_types:
             feature_df = df[df["feature_type"] == feature_type].copy()
             
-            grouped = feature_df.groupby("N")[metric].agg([
+            grouped = feature_df.groupby("n_per_class")[metric].agg([
                 ("mean", "mean"),
                 ("std", "std"),
                 ("sem", lambda x: x.std() / np.sqrt(len(x))),
             ]).reset_index()
             
-            grouped = grouped.sort_values("N")
+            grouped = grouped.sort_values("n_per_class")
             
-            N_values = grouped["N"].values
+            N_values = grouped["n_per_class"].values
             means = grouped["mean"].values
             
             if error_type == 'sem':
@@ -255,9 +255,9 @@ def plot_bootstrap_stability(results_df, feature_type, N_values=None, figsize=(1
     df = results_df[results_df["feature_type"] == feature_type].copy()
     
     if N_values is None:
-        N_values = sorted(df["N"].unique())
+        N_values = sorted(df["n_per_class"].unique())
     else:
-        df = df[df["N"].isin(N_values)]
+        df = df[df["n_per_class"].isin(N_values)]
     
     metrics = ["balanced_acc", "AUROC", "F1"]
     
@@ -272,7 +272,7 @@ def plot_bootstrap_stability(results_df, feature_type, N_values=None, figsize=(1
         labels = []
         
         for i, N in enumerate(N_values):
-            N_data = df[df["N"] == N][metric].values
+            N_data = df[df["n_per_class"] == N][metric].values
             if len(N_data) > 0:
                 plot_data.append(N_data)
                 positions.append(i)
