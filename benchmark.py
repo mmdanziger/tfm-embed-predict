@@ -14,6 +14,7 @@ from sklearn.decomposition import TruncatedSVD
 from sklearn.linear_model import SGDClassifier
 from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.preprocessing import MaxAbsScaler, StandardScaler
+from typing import Dict, List, Tuple, Optional, Callable
 
 from metrics import compute_donor_metrics, compute_metrics
 
@@ -186,6 +187,22 @@ def build_representations(adata, embedding_keys=None):
 
     return reps
 
+def fold_iterator(X, labels, sample_ids, n_folds, cv_folds=None, random_state: int = 0):
+    if cv_folds is not None:
+        for fold_id, test_samples in enumerate(cv_folds):
+            test_mask = np.isin(sample_ids, test_samples)
+            train_mask = ~test_mask
+            yield fold_id, np.where(train_mask)[0], np.where(test_mask)[0]
+    else:
+        sgkf = StratifiedGroupKFold(
+            n_splits=n_folds,
+            shuffle=True,
+            random_state=random_state
+        )
+        for fold_id, (train_idx, test_idx) in enumerate(
+            sgkf.split(X, labels, groups=sample_ids)
+        ):
+            yield fold_id, train_idx, test_idx
 
 # =============================================================================
 # Core Prediction Function
@@ -197,11 +214,13 @@ def run_predictions(
     label_col: str,
     representations: dict,
     n_folds: int = 5,
+    
     alpha: float = 1e-5,
     donor_col: str = "donor_id",
     stratify_col: str = None,
     random_state: int = 0,
     preprocess: bool = True,
+    cv_folds: Optional[List[List[str]]] = None,
     **metadata,
 ) -> pd.DataFrame:
     """
@@ -248,18 +267,23 @@ def run_predictions(
     donor_ids = adata.obs[donor_col].values
     stratify_labels = adata.obs[stratify_col].values if stratify_col else labels
 
-    # CV splits (StratifiedGroupKFold by donors)
-    sgkf = StratifiedGroupKFold(
-        n_splits=n_folds, shuffle=True, random_state=random_state
+    from sklearn.preprocessing import LabelEncoder
+
+    # ---- encode ----
+    label_encoder = LabelEncoder()
+    y_ = label_encoder.fit_transform(labels)
+    
+    logger.info(
+        f"Label mapping: {dict(enumerate(label_encoder.classes_))}"
     )
 
     results = []
 
-    for fold_id, (train_idx, test_idx) in enumerate(
-        sgkf.split(X_lognorm, stratify_labels, groups=donor_ids)
-    ):
-        y_train = labels[train_idx]
-        y_test = labels[test_idx]
+    for fold_id, train_idx, test_idx in fold_iterator(
+            X_lognorm, stratify_labels, donor_ids, n_folds, cv_folds, random_state
+        ):
+        y_train = y_[train_idx]
+        y_test  = y_[test_idx]
         donors_test = donor_ids[test_idx]
 
         fold_name = f"fold_{fold_id + 1}"
@@ -347,6 +371,7 @@ def run_predictions_downsampled(
     representations: dict,
     n_per_class_list: list,
     n_bootstrap: int = 10,
+    cv_folds: Optional[List[List[str]]] = None,
     **kwargs,
 ) -> pd.DataFrame:
     """
@@ -376,6 +401,7 @@ def run_predictions_downsampled(
                 representations,
                 n_per_class=n_per_class,
                 bootstrap=bootstrap,
+                cv_folds=cv_folds,
                 **kwargs,
             )
             all_results.append(results)
