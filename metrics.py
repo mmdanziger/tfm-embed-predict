@@ -20,6 +20,7 @@ from sklearn.metrics import (
     log_loss,
     matthews_corrcoef,
     roc_auc_score,
+    recall_score,
 )
 
 
@@ -67,6 +68,7 @@ def compute_metrics(
             "balanced_acc": np.nan,
             "MCC": np.nan,
             "F1_macro": np.nan,
+            "recall_macro": np.nan,
             "log_loss": np.nan,
             "n_unknown_labels": int(n_unknown),
             "n_valid_test_samples": int(n_valid),
@@ -90,6 +92,7 @@ def compute_metrics(
             "balanced_acc": np.nan,
             "MCC": np.nan,
             "F1_macro": np.nan,
+            "recall_macro": np.nan,
             "log_loss": np.nan,
             "n_unknown_labels": int(n_unknown),
             "n_valid_test_samples": int(n_valid),
@@ -104,6 +107,11 @@ def compute_metrics(
         "MCC": float(matthews_corrcoef(y_true_idx, y_pred_class_filtered)),
         "F1_macro": float(
             f1_score(
+                y_true_idx, y_pred_class_filtered, average="macro", zero_division=0
+            )
+        ),
+        "recall_macro": float(
+            recall_score(
                 y_true_idx, y_pred_class_filtered, average="macro", zero_division=0
             )
         ),
@@ -245,6 +253,11 @@ def compute_donor_metrics(
             "MCC_donor": float(matthews_corrcoef(y_true_donor_idx, y_pred_donor_idx)),
             "F1_macro_donor": float(
                 f1_score(
+                    y_true_donor_idx, y_pred_donor_idx, average="macro", zero_division=0
+                )
+            ),
+            "recall_macro_donor": float(
+                recall_score(
                     y_true_donor_idx, y_pred_donor_idx, average="macro", zero_division=0
                 )
             ),
