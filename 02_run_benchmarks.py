@@ -389,6 +389,12 @@ def main():
     ap.add_argument(
         "--no_retry_errors", action="store_true", help="Don't retry errored tasks"
     )
+    ap.add_argument(
+    "--resume_from", 
+    type=int, 
+    default=0, 
+    help="Resume from task N in manifest (skip first N tasks)"
+    )
     args = ap.parse_args()
 
     logger = setup_logging(args.log_file)
@@ -427,6 +433,17 @@ def main():
     tasks_df["task_id"] = tasks_df["dataset_id"] + "::" + tasks_df["cell_type"]
     remaining_df = tasks_df[~tasks_df["task_id"].isin(completed_tasks)].copy()
     logger.info(f"Tasks to process: {len(remaining_df)}")
+
+    if args.resume_from > 0:
+        logger.info(f"  RESUMING: Skipping first {args.resume_from} tasks from ORIGINAL manifest")
+        # Skip based on original tasks_df, not remaining_df
+        tasks_df_filtered = tasks_df.iloc[args.resume_from:]
+        remaining_df = tasks_df_filtered[~tasks_df_filtered["task_id"].isin(completed_tasks)].copy()
+        logger.info(f"  Tasks after resume skip: {len(remaining_df)}")
+    else:
+        logger.info(f"Tasks to process: {len(remaining_df)}")
+
+
 
     if len(remaining_df) == 0:
         logger.info("All tasks complete. Merging shards...")
