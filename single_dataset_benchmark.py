@@ -17,6 +17,7 @@ Main functions:
 - run_pseudobulk_benchmark(): CV on donor-aggregated data
 - create_pseudobulk_adata(): Aggregate cells to donors
 """
+import json
 
 import argparse
 import logging
@@ -26,6 +27,7 @@ import pandas as pd
 import scanpy as sc
 from anndata import AnnData
 from scipy import sparse
+from typing import Dict, List, Tuple, Optional, Callable
 
 from benchmark import (
     build_representations,
@@ -48,6 +50,7 @@ def run_cv_benchmark(
     n_folds: int = 5,
     alpha: float = 1e-5,
     random_state: int = 0,
+    cv_folds: Optional[List[List[str]]] = None,
     **metadata,
 ) -> pd.DataFrame:
     """
@@ -79,6 +82,7 @@ def run_cv_benchmark(
         donor_col=donor_col,
         random_state=random_state,
         preprocess=True,
+        cv_folds=cv_folds,
         **metadata,
     )
 
@@ -93,6 +97,7 @@ def run_low_data_benchmark(
     n_folds: int = 5,
     alpha: float = 1e-5,
     random_state: int = 0,
+    cv_folds: Optional[List[List[str]]] = None,
     **metadata,
 ) -> pd.DataFrame:
     """
@@ -127,6 +132,7 @@ def run_low_data_benchmark(
         alpha=alpha,
         donor_col=donor_col,
         random_state=random_state,
+        cv_folds=cv_folds,
         **metadata,
     )
 
@@ -231,6 +237,7 @@ def run_pseudobulk_benchmark(
     n_folds: int = 5,
     alpha: float = 1e-5,
     random_state: int = 0,
+    cv_folds: Optional[List[List[str]]] = None,
     **metadata,
 ) -> pd.DataFrame:
     """
@@ -288,6 +295,7 @@ def run_pseudobulk_benchmark(
         random_state=random_state,
         preprocess=False,  # Already preprocessed
         pooling=pooling,  # Add pooling to metadata
+        cv_folds=cv_folds,
         **metadata,
     )
 
@@ -353,6 +361,12 @@ Examples:
     ap.add_argument(
         "--n_folds", type=int, default=5, help="Number of CV folds (default: 5)"
     )
+
+    ap.add_argument(
+        "--cv_folds", type=str, default=None,
+        help="JSON string: list of folds, each fold is a list of sample IDs"
+    )
+    
     ap.add_argument(
         "--alpha",
         type=float,
@@ -411,6 +425,12 @@ Examples:
     adata = sc.read_h5ad(args.adata_path)
     logger.info(f"Loaded: {adata.shape[0]} cells × {adata.shape[1]} genes")
 
+    if args.cv_folds is not None:
+        cv_folds: Optional[List[List[str]]] = json.loads(args.cv_folds)
+    else:
+        cv_folds = None
+
+    
     if args.mode == "pseudobulk":
         n_donors = adata.obs[args.donor_col].nunique()
         logger.info(f"Found {n_donors} unique donors")
@@ -426,6 +446,7 @@ Examples:
             n_folds=args.n_folds,
             alpha=args.alpha,
             random_state=args.random_state,
+            cv_folds=cv_folds
         )
 
     elif args.mode == "low_data":
@@ -440,6 +461,7 @@ Examples:
             n_folds=args.n_folds,
             alpha=args.alpha,
             random_state=args.random_state,
+            cv_folds=cv_folds
         )
 
     elif args.mode == "pseudobulk":
@@ -453,6 +475,7 @@ Examples:
             n_folds=args.n_folds,
             alpha=args.alpha,
             random_state=args.random_state,
+            cv_folds=cv_folds
         )
 
     # Save results
