@@ -263,34 +263,57 @@ def run_predictions(
         # Data already preprocessed (e.g., from cache)
         X_lognorm = adata.X if sparse.issparse(adata.X) else sparse.csr_matrix(adata.X)
 
-    labels = adata.obs[label_col].values
+    #labels = adata.obs[label_col].values
+    #labels = adata.obs["disease"].astype(str).values
+    labels = np.array(adata.obs[label_col], dtype=str)
     donor_ids = adata.obs[donor_col].values
-    stratify_labels = adata.obs[stratify_col].values if stratify_col else labels
+    #stratify_labels = adata.obs[stratify_col].values if stratify_col else labels
+    stratify_labels = np.array(adata.obs[stratify_col], dtype=str) if stratify_col else labels
 
-    from sklearn.preprocessing import LabelEncoder
-
-    # ---- encode ----
-    label_encoder = LabelEncoder()
-    y_ = label_encoder.fit_transform(labels)
     
-    logger.info(
-        f"Label mapping: {dict(enumerate(label_encoder.classes_))}"
-    )
+    
+    
+    # ---- encode ----
+    #from sklearn.preprocessing import LabelEncoder
+    #label_encoder = LabelEncoder()
+    #y_ = label_encoder.fit_transform(labels)
+    
+    #logger.info(
+    #    f"Label mapping: {dict(enumerate(label_encoder.classes_))}"
+    #)
 
     results = []
+    n_per_class = metadata.pop("n_per_class", None)
+    random_seed_base = metadata.get("bootstrap", 0) + random_state
 
+    assert stratify_labels.dtype == object or np.issubdtype(stratify_labels.dtype, np.str_), \
+        f"stratify_labels dtype={stratify_labels.dtype}, values={np.unique(stratify_labels)}"    
     for fold_id, train_idx, test_idx in fold_iterator(
             X_lognorm, stratify_labels, donor_ids, n_folds, cv_folds, random_state
         ):
-        y_train = y_[train_idx]
-        y_test  = y_[test_idx]
+        y_train = labels[train_idx]
+        y_test  = labels[test_idx]
         donors_test = donor_ids[test_idx]
+        #import pdb; pdb.set_trace()
+        ### downsample X
+        
 
+        if n_per_class is not None:
+            train_idx, all_classes_met = downsample_to_n_per_class(
+                train_idx=train_idx,
+                y_train=y_train,
+                n_per_class=n_per_class,
+                random_state=random_seed_base + fold_id,  # unique per fold AND bootstrap,
+                logger=logger,
+            )
+            y_train = labels[train_idx]
+        ###     
+        
         fold_name = f"fold_{fold_id + 1}"
         logger.info(
             f"  {fold_name}: {len(train_idx)} train, {len(test_idx)} test cells"
         )
-
+        #if fold_id==2: import pdb; pdb.set_trace()
         # For each representation
         for rep_name, extractor in representations.items():
             try:
@@ -304,7 +327,7 @@ def run_predictions(
                     class_weight="balanced",
                     max_iter=2000,
                     random_state=random_state,
-                    early_stopping=len(y_train) >= 10,  # Adaptive
+                    early_stopping=len(y_train) >= 50,  # Adaptive
                 )
                 clf.fit(X_train, y_train)
 
@@ -327,6 +350,7 @@ def run_predictions(
                         "using predict-only metrics"
                     )
                     y_proba = None
+                
 
                 # Compute metrics (handle case where probabilities unavailable)
                 cell_metrics = compute_metrics(y_test, y_proba, y_pred, clf.classes_)
@@ -340,6 +364,7 @@ def run_predictions(
                         "representation": rep_name,
                         "n_train": len(train_idx),
                         "n_test": len(test_idx),
+                        "n_per_class":n_per_class,
                         **metadata,
                         **cell_metrics,
                         **donor_metrics,
@@ -363,6 +388,34 @@ def run_predictions(
 # =============================================================================
 # Optional: Downsampling Wrapper
 # =============================================================================
+def downsample_to_n_per_class(
+    train_idx: np.ndarray,
+    y_train: np.ndarray,
+    n_per_class: int,
+    random_state: int,
+    logger: logging.Logger
+) -> Tuple[np.ndarray, bool]:
+    """Downsample training data to N samples per class."""
+    rng = np.random.RandomState(random_state)
+    selected_idx = []
+    all_classes_met = True
+    
+    for class_label in np.unique(y_train):
+        class_mask = y_train == class_label
+        class_indices = train_idx[class_mask]
+        n_available = len(class_indices)
+        
+        if n_available < n_per_class:
+            logger.warning(
+                f"    Class {class_label}: only {n_available}/{n_per_class} available"
+            )
+            selected_idx.extend(class_indices)
+            all_classes_met = False
+        else:
+            selected = rng.choice(class_indices, size=n_per_class, replace=False)
+            selected_idx.extend(selected)
+    
+    return np.array(selected_idx), all_classes_met
 
 
 def run_predictions_downsampled(
@@ -405,5 +458,4 @@ def run_predictions_downsampled(
                 **kwargs,
             )
             all_results.append(results)
-
     return pd.concat(all_results, ignore_index=True)
