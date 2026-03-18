@@ -46,6 +46,7 @@ def compute_metrics(
         Dictionary of metrics with NaN for cases where computation fails
 
     """
+
     logger = logging.getLogger("benchmark")
     label_map = {c: i for i, c in enumerate(clf_classes)}
 
@@ -84,7 +85,7 @@ def compute_metrics(
         y_pred_proba_filtered = None
 
     y_true_idx = np.array([label_map[y] for y in y_true_filtered])
-
+    y_pred_idx = np.array([label_map.get(y, -1) for y in y_pred_class_filtered])
     # Check we still have multiple classes after filtering
     unique_true = np.unique(y_true_idx)
     if len(unique_true) < 2:
@@ -102,17 +103,17 @@ def compute_metrics(
     # Base metrics (don't need probabilities)
     metrics = {
         "balanced_acc": float(
-            balanced_accuracy_score(y_true_idx, y_pred_class_filtered)
+            balanced_accuracy_score(y_true_idx, y_pred_idx)
         ),
-        "MCC": float(matthews_corrcoef(y_true_idx, y_pred_class_filtered)),
+        "MCC": float(matthews_corrcoef(y_true_idx, y_pred_idx)),
         "F1_macro": float(
             f1_score(
-                y_true_idx, y_pred_class_filtered, average="macro", zero_division=0
+                y_true_idx, y_pred_idx, average="macro", zero_division=0
             )
         ),
         "recall_macro": float(
             recall_score(
-                y_true_idx, y_pred_class_filtered, average="macro", zero_division=0
+                y_true_idx, y_pred_idx, average="macro", zero_division=0
             )
         ),
         "n_unknown_labels": int(n_unknown),
@@ -198,7 +199,6 @@ def compute_donor_metrics(
                 "y_pred": y_pred,
             }
         )
-
         # Filter to known labels
         df = df[df["y_true"].isin(label_map.keys())].copy()
 
@@ -206,9 +206,8 @@ def compute_donor_metrics(
             return {"donor_metric_error": "insufficient_samples_after_filtering"}
 
         # Per-donor accuracy
-        donor_acc = df.groupby("donor", observed=True).apply(
-            lambda g: (g["y_true"] == g["y_pred"]).mean(), include_groups=False
-        )
+        df["correct"] = df["y_true"] == df["y_pred"]
+        donor_acc = df.groupby("donor", observed=True)["correct"].mean()
 
         # Majority vote aggregation
         donor_agg = (
