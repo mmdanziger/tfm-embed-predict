@@ -25,6 +25,7 @@ Usage:
 """
 
 import argparse
+import fcntl
 import logging
 import sys
 import threading
@@ -45,6 +46,34 @@ _FETCH_SEM = threading.Semaphore(2)
 
 
 def migrate_one(path: Path, census) -> dict:
+    # Advisory exclusive lock on a sidecar file so concurrent invocations of
+    # this script (or a stray re-submission) can't race on the same cache.
+    # LOCK_NB → skip immediately if another process holds it rather than block.
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    try:
+        lock_fd = open(lock_path, "w")
+    except OSError as e:
+        return {"path": str(path), "status": "error", "error": f"lock open: {e}"}
+
+    try:
+        try:
+            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return {"path": str(path), "status": "skip_locked"}
+
+        return _migrate_one_locked(path, census)
+    finally:
+        try:
+            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+        finally:
+            lock_fd.close()
+            try:
+                lock_path.unlink()
+            except OSError:
+                pass
+
+
+def _migrate_one_locked(path: Path, census) -> dict:
     try:
         a = sc.read_h5ad(path)
     except Exception as e:
@@ -144,7 +173,18 @@ def main() -> int:
     paths = sorted(cache_dir.glob("*.h5ad"))
     logger.info(f"Found {len(paths)} cache files under {cache_dir}")
 
+    # Flag stale artifacts from prior crashed runs. We don't auto-delete — they
+    # could mask a real issue (or a live run); surface them for the operator.
+    stale_tmp = sorted(cache_dir.glob("*.h5ad.migrating"))
+    stale_lock = sorted(cache_dir.glob("*.h5ad.lock"))
+    if stale_tmp or stale_lock:
+        logger.warning(
+            f"Found {len(stale_tmp)} .migrating and {len(stale_lock)} .lock files "
+            "from prior runs. Inspect and remove before re-running if no migrator is active."
+        )
+
     to_migrate = []
+    scan_unreadable: list[dict] = []
     for p in paths:
         try:
             a = sc.read_h5ad(p, backed="r")
@@ -153,19 +193,26 @@ def main() -> int:
                 to_migrate.append(p)
         except Exception as e:
             logger.warning(f"[SCAN FAIL] {p}: {e}")
+            scan_unreadable.append({"path": str(p), "error": str(e)})
 
     logger.info(f"Pre-v2 caches: {len(to_migrate)} / {len(paths)}")
+    if scan_unreadable:
+        logger.warning(
+            f"Scan could not read {len(scan_unreadable)} files — these were NOT "
+            "considered for migration. Status unknown."
+        )
 
     if args.dry_run:
         for p in to_migrate:
             logger.info(f"  would migrate: {p}")
-        return 0
+        # Treat scan failures as a non-zero exit even in dry-run so CI catches them.
+        return 1 if scan_unreadable else 0
 
-    if not to_migrate:
+    if not to_migrate and not scan_unreadable:
         logger.info("Nothing to do.")
         return 0
 
-    counts = {"migrated": 0, "skip_already_v2": 0, "error": 0}
+    counts = {"migrated": 0, "skip_already_v2": 0, "skip_locked": 0, "error": 0}
     failures = []
 
     logger.info(f"Opening Census (version={args.census_version})...")
@@ -185,12 +232,29 @@ def main() -> int:
                     pbar.set_postfix_str(str(counts))
 
     logger.info(f"Done. {counts}")
+
+    exit_bad = False
     if failures:
         logger.warning(
             f"{len(failures)} files failed — rerun to retry, or rebuild via phase 1."
         )
-        return 1
-    return 0
+        exit_bad = True
+    if counts.get("skip_locked"):
+        logger.warning(
+            f"{counts['skip_locked']} files were skipped because another migrator "
+            "held the lock. Rerun after it completes to cover them."
+        )
+        exit_bad = True
+    if scan_unreadable:
+        logger.warning(
+            f"{len(scan_unreadable)} files were unreadable at scan time and were "
+            "never attempted:"
+        )
+        for item in scan_unreadable:
+            logger.warning(f"  {item['path']}: {item['error']}")
+        exit_bad = True
+
+    return 1 if exit_bad else 0
 
 
 if __name__ == "__main__":
