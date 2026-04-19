@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 FAST Benchmark: Two-phase approach for disease prediction with MULTIPLE MODES.
 
@@ -145,13 +144,17 @@ def fetch_single_task_with_census(
         X = X[:, gene_mask]
         X_lognorm = sparse_normalize_log1p(X)
 
-        # Store processed data
+        # Store processed data. Preserving adata.var is CRITICAL: without it,
+        # var_names default to positional integer strings and sc.concat(join=...)
+        # across caches silently mixes different genes into the same column.
         adata_processed = AnnData(
             X=X_lognorm,
             obs=adata.obs[["dataset_id", "cell_type", "donor_id", "disease"]].copy(),
+            var=adata.var.iloc[gene_mask].copy(),
             obsm={k: adata.obsm[k] for k in embedding_keys if k in adata.obsm},
         )
         adata_processed.uns["n_genes_original"] = int(gene_mask.sum())
+        adata_processed.uns["cache_format_version"] = 2
 
         # Save
         adata_processed.write_h5ad(cache_path)
@@ -184,11 +187,11 @@ def fetch_single_task_with_census(
 
 def run_single_task_standard(args_tuple) -> list[dict]:
     """Run standard CV benchmark on a single cached task. Returns list of result dicts."""
-    cache_path, embedding_keys, n_splits, alpha, pca_components, random_state = args_tuple
+    cache_path, embedding_keys, n_splits, alpha, pca_components, random_state = (
+        args_tuple
+    )
 
     try:
-        import time
-
         from benchmark import build_representations, run_predictions
 
         # Load cached data (already preprocessed!)
@@ -260,7 +263,16 @@ def run_single_task_standard(args_tuple) -> list[dict]:
 
 def run_single_task_lowdata(args_tuple) -> list[dict]:
     """Run low-data benchmark with downsampling."""
-    cache_path, embedding_keys, n_splits, alpha, pca_components, random_state, n_per_class, n_bootstrap = args_tuple
+    (
+        cache_path,
+        embedding_keys,
+        n_splits,
+        alpha,
+        pca_components,
+        random_state,
+        n_per_class,
+        n_bootstrap,
+    ) = args_tuple
 
     try:
         from benchmark import build_representations, run_predictions_downsampled
@@ -333,7 +345,15 @@ def run_single_task_lowdata(args_tuple) -> list[dict]:
 
 def run_single_task_pseudobulk(args_tuple) -> list[dict]:
     """Run pseudobulk benchmark with donor aggregation."""
-    cache_path, embedding_keys, n_splits, alpha, pca_components, random_state, pooling = args_tuple
+    (
+        cache_path,
+        embedding_keys,
+        n_splits,
+        alpha,
+        pca_components,
+        random_state,
+        pooling,
+    ) = args_tuple
 
     try:
         from benchmark import build_representations, run_predictions
@@ -510,7 +530,7 @@ def main():
     ap.add_argument("--tasks_manifest", required=True, help="Task manifest parquet")
     ap.add_argument("--out_parquet", required=True, help="Output results parquet")
     ap.add_argument("--log_file", default="benchmark_fast.log", help="Log file")
-    
+
     # Mode selection
     ap.add_argument(
         "--mode",
@@ -518,7 +538,7 @@ def main():
         default="standard",
         help="Benchmark mode (default: standard)",
     )
-    
+
     # Census parameters
     ap.add_argument("--census_uri", default=None, help="Census URI (None for S3)")
     ap.add_argument("--census_version", default="2025-01-30", help="Census version")
@@ -530,13 +550,20 @@ def main():
     ap.add_argument(
         "--cache_dir", default="./_adata_cache", help="Directory for cached .h5ad files"
     )
-    
+
     # CV parameters
     ap.add_argument("--folds", type=int, default=5, help="CV folds")
     ap.add_argument("--alpha", type=float, default=1e-5, help="L2 regularization")
-    ap.add_argument("--pca_components", type=int, default=50, help="Number of PCA components (default: 50)")
-    ap.add_argument("--random_state", type=int, default=0, help="Random seed (default: 0)")
-    
+    ap.add_argument(
+        "--pca_components",
+        type=int,
+        default=50,
+        help="Number of PCA components (default: 50)",
+    )
+    ap.add_argument(
+        "--random_state", type=int, default=0, help="Random seed (default: 0)"
+    )
+
     # Low-data mode parameters
     ap.add_argument(
         "--n_per_class",
@@ -551,7 +578,7 @@ def main():
         default=10,
         help="Bootstrap replicates for low-data mode (default: 10)",
     )
-    
+
     # Pseudobulk mode parameters
     ap.add_argument(
         "--pooling",
@@ -559,7 +586,7 @@ def main():
         default="median",
         help="Pooling strategy for pseudobulk mode (default: median)",
     )
-    
+
     # Parallelization
     ap.add_argument(
         "--fetch_workers", type=int, default=4, help="Parallel fetch threads"
@@ -576,7 +603,7 @@ def main():
         default=None,
         help="Parallel compute workers (default: CPU count)",
     )
-    
+
     # Other options
     ap.add_argument(
         "--task_limit", type=int, default=None, help="Limit tasks (for testing)"
@@ -620,7 +647,9 @@ def main():
         f"  Fetch: {args.fetch_workers} threads, semaphore={args.fetch_semaphore}"
     )
     if args.mode == "low_data":
-        logger.info(f"  Low-data: n_per_class={args.n_per_class}, n_bootstrap={args.n_bootstrap}")
+        logger.info(
+            f"  Low-data: n_per_class={args.n_per_class}, n_bootstrap={args.n_bootstrap}"
+        )
     elif args.mode == "pseudobulk":
         logger.info(f"  Pseudobulk: pooling={args.pooling}")
     logger.info(f"{'=' * 70}")
@@ -749,21 +778,45 @@ def main():
     # Prepare compute args based on mode
     if args.mode == "standard":
         compute_args = [
-            (path, args.embeddings, args.folds, args.alpha, args.pca_components, args.random_state)
+            (
+                path,
+                args.embeddings,
+                args.folds,
+                args.alpha,
+                args.pca_components,
+                args.random_state,
+            )
             for path in tasks_to_compute.values()
         ]
         task_func = run_single_task_standard
 
     elif args.mode == "low_data":
         compute_args = [
-            (path, args.embeddings, args.folds, args.alpha, args.pca_components, args.random_state, args.n_per_class, args.n_bootstrap)
+            (
+                path,
+                args.embeddings,
+                args.folds,
+                args.alpha,
+                args.pca_components,
+                args.random_state,
+                args.n_per_class,
+                args.n_bootstrap,
+            )
             for path in tasks_to_compute.values()
         ]
         task_func = run_single_task_lowdata
 
     elif args.mode == "pseudobulk":
         compute_args = [
-            (path, args.embeddings, args.folds, args.alpha, args.pca_components, args.random_state, args.pooling)
+            (
+                path,
+                args.embeddings,
+                args.folds,
+                args.alpha,
+                args.pca_components,
+                args.random_state,
+                args.pooling,
+            )
             for path in tasks_to_compute.values()
         ]
         task_func = run_single_task_pseudobulk
@@ -772,9 +825,7 @@ def main():
     tasks_computed = 0
 
     with ProcessPoolExecutor(max_workers=compute_workers) as executor:
-        futures = {
-            executor.submit(task_func, arg): arg[0] for arg in compute_args
-        }
+        futures = {executor.submit(task_func, arg): arg[0] for arg in compute_args}
 
         with tqdm(total=len(futures), desc="Computing", unit="task") as pbar:
             for future in as_completed(futures):

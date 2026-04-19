@@ -27,10 +27,10 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import scanpy as sc
 from tqdm.auto import tqdm
 
 from benchmark import setup_logging
+from cache_io import load_and_concat_celltype_caches
 
 
 def get_cache_filename(dataset_id: str, cell_type: str) -> str:
@@ -92,15 +92,17 @@ def benchmark_one_task_standard(args_tuple) -> pd.DataFrame:
 
         if missing:
             logger.warning(f"[SKIP] {dataset_id}: Missing {len(missing)} cache files")
-            return pd.DataFrame([{
-                "dataset_id": dataset_id,
-                "skip_reason": "missing_cache_files",
-                "n_missing": len(missing),
-            }])
+            return pd.DataFrame(
+                [
+                    {
+                        "dataset_id": dataset_id,
+                        "skip_reason": "missing_cache_files",
+                        "n_missing": len(missing),
+                    }
+                ]
+            )
 
-        adatas = [sc.read_h5ad(p) for p in cache_paths]
-        adata = sc.concat(adatas, join="inner") if len(adatas) > 1 else adatas[0]
-        del adatas
+        adata = load_and_concat_celltype_caches(cache_paths)
         gc.collect()
 
         if adata.n_obs == 0:
@@ -114,15 +116,21 @@ def benchmark_one_task_standard(args_tuple) -> pd.DataFrame:
         n_genes = adata.n_vars
 
         if n_cell_types < 2:
-            return pd.DataFrame([{"dataset_id": dataset_id, "skip_reason": "too_few_celltypes"}])
+            return pd.DataFrame(
+                [{"dataset_id": dataset_id, "skip_reason": "too_few_celltypes"}]
+            )
 
         is_feasible, reason, stats = validate_task_feasibility(y, donors)
         if not is_feasible:
-            return pd.DataFrame([{"dataset_id": dataset_id, "skip_reason": reason, **stats}])
+            return pd.DataFrame(
+                [{"dataset_id": dataset_id, "skip_reason": reason, **stats}]
+            )
 
         k_folds = min(n_splits, n_donors)
         if k_folds < 2:
-            return pd.DataFrame([{"dataset_id": dataset_id, "skip_reason": "too_few_donors"}])
+            return pd.DataFrame(
+                [{"dataset_id": dataset_id, "skip_reason": "too_few_donors"}]
+            )
 
         # Run benchmark
         from benchmark import build_representations, run_predictions
@@ -148,26 +156,47 @@ def benchmark_one_task_standard(args_tuple) -> pd.DataFrame:
         for r in results:
             r["feature"] = r.pop("representation")
 
-        return pd.DataFrame(results) if results else pd.DataFrame([{
-            "dataset_id": dataset_id,
-            "skip_reason": "all_folds_degenerate",
-        }])
+        return (
+            pd.DataFrame(results)
+            if results
+            else pd.DataFrame(
+                [
+                    {
+                        "dataset_id": dataset_id,
+                        "skip_reason": "all_folds_degenerate",
+                    }
+                ]
+            )
+        )
 
     except Exception as e:
         logger.error(f"[FAILED] {dataset_id}: {e}")
-        return pd.DataFrame([{
-            "dataset_id": dataset_id,
-            "error": str(e),
-            "error_type": type(e).__name__,
-            "traceback": traceback.format_exc(),
-        }])
+        return pd.DataFrame(
+            [
+                {
+                    "dataset_id": dataset_id,
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                    "traceback": traceback.format_exc(),
+                }
+            ]
+        )
     finally:
         gc.collect()
 
 
 def benchmark_one_task_lowdata(args_tuple) -> pd.DataFrame:
     """LOW_DATA mode: Run cell type prediction with downsampling."""
-    task_row, cache_dir, embedding_keys, n_splits, alpha, random_state, n_per_class, n_bootstrap = args_tuple
+    (
+        task_row,
+        cache_dir,
+        embedding_keys,
+        n_splits,
+        alpha,
+        random_state,
+        n_per_class,
+        n_bootstrap,
+    ) = args_tuple
 
     dataset_id = task_row["dataset_id"]
     eligible_cell_types = task_row["cell_type"]
@@ -185,15 +214,17 @@ def benchmark_one_task_lowdata(args_tuple) -> pd.DataFrame:
                 cache_paths.append(fpath)
 
         if missing:
-            return pd.DataFrame([{
-                "dataset_id": dataset_id,
-                "skip_reason": "missing_cache_files",
-                "n_missing": len(missing),
-            }])
+            return pd.DataFrame(
+                [
+                    {
+                        "dataset_id": dataset_id,
+                        "skip_reason": "missing_cache_files",
+                        "n_missing": len(missing),
+                    }
+                ]
+            )
 
-        adatas = [sc.read_h5ad(p) for p in cache_paths]
-        adata = sc.concat(adatas, join="inner") if len(adatas) > 1 else adatas[0]
-        del adatas
+        adata = load_and_concat_celltype_caches(cache_paths)
         gc.collect()
 
         if adata.n_obs == 0:
@@ -207,15 +238,21 @@ def benchmark_one_task_lowdata(args_tuple) -> pd.DataFrame:
         n_genes = adata.n_vars
 
         if n_cell_types < 2:
-            return pd.DataFrame([{"dataset_id": dataset_id, "skip_reason": "too_few_celltypes"}])
+            return pd.DataFrame(
+                [{"dataset_id": dataset_id, "skip_reason": "too_few_celltypes"}]
+            )
 
         is_feasible, reason, stats = validate_task_feasibility(y, donors)
         if not is_feasible:
-            return pd.DataFrame([{"dataset_id": dataset_id, "skip_reason": reason, **stats}])
+            return pd.DataFrame(
+                [{"dataset_id": dataset_id, "skip_reason": reason, **stats}]
+            )
 
         k_folds = min(n_splits, n_donors)
         if k_folds < 2:
-            return pd.DataFrame([{"dataset_id": dataset_id, "skip_reason": "too_few_donors"}])
+            return pd.DataFrame(
+                [{"dataset_id": dataset_id, "skip_reason": "too_few_donors"}]
+            )
 
         # Run low-data benchmark
         from benchmark import build_representations, run_predictions_downsampled
@@ -242,19 +279,31 @@ def benchmark_one_task_lowdata(args_tuple) -> pd.DataFrame:
         for r in results:
             r["feature"] = r.pop("representation")
 
-        return pd.DataFrame(results) if results else pd.DataFrame([{
-            "dataset_id": dataset_id,
-            "skip_reason": "all_folds_degenerate",
-        }])
+        return (
+            pd.DataFrame(results)
+            if results
+            else pd.DataFrame(
+                [
+                    {
+                        "dataset_id": dataset_id,
+                        "skip_reason": "all_folds_degenerate",
+                    }
+                ]
+            )
+        )
 
     except Exception as e:
         logger.error(f"[FAILED] {dataset_id}: {e}")
-        return pd.DataFrame([{
-            "dataset_id": dataset_id,
-            "error": str(e),
-            "error_type": type(e).__name__,
-            "traceback": traceback.format_exc(),
-        }])
+        return pd.DataFrame(
+            [
+                {
+                    "dataset_id": dataset_id,
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                    "traceback": traceback.format_exc(),
+                }
+            ]
+        )
     finally:
         gc.collect()
 
@@ -267,57 +316,58 @@ def create_pseudobulk_adata_for_celltype(
 ):
     """
     Create pseudobulk by aggregating cells within each (donor, cell_type) pair.
-    
+
     This preserves cell type labels for cell type prediction tasks.
     """
     import pandas as pd
     from scipy import sparse
-    
+
     # Group by (donor_id, cell_type)
     adata.obs["_pseudobulk_group"] = (
-        adata.obs[donor_col].astype(str) + ":::" + 
-        adata.obs[celltype_col].astype(str)
+        adata.obs[donor_col].astype(str) + ":::" + adata.obs[celltype_col].astype(str)
     )
-    
+
     groups = adata.obs["_pseudobulk_group"].unique()
-    
+
     pseudobulk_profiles = []
     metadata = []
-    
+
     for group in groups:
         mask = adata.obs["_pseudobulk_group"] == group
         cells = adata[mask]
-        
+
         # Aggregate expression
         X_group = cells.X
         if sparse.issparse(X_group):
             X_group = X_group.toarray()
-        
+
         if pooling == "mean":
             profile = X_group.mean(axis=0)
         elif pooling == "median":
             profile = np.median(X_group, axis=0)
         elif pooling == "sum":
             profile = X_group.sum(axis=0)
-        
+
         pseudobulk_profiles.append(profile)
-        
+
         # Keep metadata
         donor_id = cells.obs[donor_col].iloc[0]
         cell_type = cells.obs[celltype_col].iloc[0]
         disease = cells.obs["disease"].iloc[0] if "disease" in cells.obs else "unknown"
-        
-        metadata.append({
-            donor_col: donor_id,
-            celltype_col: cell_type,
-            "disease": disease,
-            "n_cells_aggregated": cells.n_obs,
-        })
-    
+
+        metadata.append(
+            {
+                donor_col: donor_id,
+                celltype_col: cell_type,
+                "disease": disease,
+                "n_cells_aggregated": cells.n_obs,
+            }
+        )
+
     # Create new AnnData
     X_pb = np.vstack(pseudobulk_profiles)
     obs_pb = pd.DataFrame(metadata)
-    
+
     # Handle embeddings
     obsm_pb = {}
     if adata.obsm:
@@ -326,37 +376,40 @@ def create_pseudobulk_adata_for_celltype(
             for group in groups:
                 mask = adata.obs["_pseudobulk_group"] == group
                 emb = adata.obsm[key][mask]
-                
+
                 if pooling == "mean":
                     agg_emb = emb.mean(axis=0)
                 elif pooling == "median":
                     agg_emb = np.median(emb, axis=0)
                 else:
                     agg_emb = emb.mean(axis=0)
-                
+
                 group_embeddings.append(agg_emb)
-            
+
             obsm_pb[key] = np.vstack(group_embeddings)
-    
+
     from anndata import AnnData
+
     adata_pb = AnnData(
         X=X_pb,
         obs=obs_pb,
         var=adata.var.copy(),
         obsm=obsm_pb,
     )
-    
+
     return adata_pb
 
 
 def benchmark_one_task_pseudobulk(args_tuple) -> pd.DataFrame:
     """PSEUDOBULK mode: Aggregate by (donor, cell_type) pairs."""
-    task_row, cache_dir, embedding_keys, n_splits, alpha, random_state, pooling = args_tuple
-    
+    task_row, cache_dir, embedding_keys, n_splits, alpha, random_state, pooling = (
+        args_tuple
+    )
+
     dataset_id = task_row["dataset_id"]
     eligible_cell_types = task_row["cell_type"]
     logger = logging.getLogger("benchmark")
-    
+
     try:
         # Load and concatenate (same as before)
         missing = []
@@ -367,19 +420,21 @@ def benchmark_one_task_pseudobulk(args_tuple) -> pd.DataFrame:
                 missing.append(ct)
             else:
                 cache_paths.append(fpath)
-        
+
         if missing:
-            return pd.DataFrame([{
-                "dataset_id": dataset_id,
-                "skip_reason": "missing_cache_files",
-                "n_missing": len(missing),
-            }])
-        
-        adatas = [sc.read_h5ad(p) for p in cache_paths]
-        adata = sc.concat(adatas, join="inner") if len(adatas) > 1 else adatas[0]
-        del adatas
+            return pd.DataFrame(
+                [
+                    {
+                        "dataset_id": dataset_id,
+                        "skip_reason": "missing_cache_files",
+                        "n_missing": len(missing),
+                    }
+                ]
+            )
+
+        adata = load_and_concat_celltype_caches(cache_paths)
         gc.collect()
-        
+
         # Create pseudobulk: aggregate by (donor, cell_type)
         adata_pb = create_pseudobulk_adata_for_celltype(
             adata,
@@ -389,30 +444,41 @@ def benchmark_one_task_pseudobulk(args_tuple) -> pd.DataFrame:
         )
         del adata
         gc.collect()
-        
+
         # Validate
         y = adata_pb.obs["cell_type"].astype(str).values
         donors = adata_pb.obs["donor_id"].astype(str).values
         n_cell_types = len(np.unique(y))
         n_donors = len(np.unique(donors))
         n_genes = adata_pb.n_vars
-        
+
         if n_cell_types < 2:
-            return pd.DataFrame([{"dataset_id": dataset_id, "skip_reason": "too_few_celltypes_after_pseudobulk"}])
-        
+            return pd.DataFrame(
+                [
+                    {
+                        "dataset_id": dataset_id,
+                        "skip_reason": "too_few_celltypes_after_pseudobulk",
+                    }
+                ]
+            )
+
         is_feasible, reason, stats = validate_task_feasibility(y, donors)
         if not is_feasible:
-            return pd.DataFrame([{"dataset_id": dataset_id, "skip_reason": reason, **stats}])
-        
+            return pd.DataFrame(
+                [{"dataset_id": dataset_id, "skip_reason": reason, **stats}]
+            )
+
         k_folds = min(n_splits, n_donors)
         if k_folds < 2:
-            return pd.DataFrame([{"dataset_id": dataset_id, "skip_reason": "too_few_donors"}])
-        
+            return pd.DataFrame(
+                [{"dataset_id": dataset_id, "skip_reason": "too_few_donors"}]
+            )
+
         # Run benchmark on pseudobulk
         from benchmark import build_representations, run_predictions
-        
+
         representations = build_representations(adata_pb, embedding_keys=embedding_keys)
-        
+
         results_df = run_predictions(
             adata_pb,
             label_col="cell_type",
@@ -428,26 +494,39 @@ def benchmark_one_task_pseudobulk(args_tuple) -> pd.DataFrame:
             n_cell_types=n_cell_types,
             pooling=pooling,
         )
-        
+
         results = results_df.to_dict(orient="records")
         for r in results:
             r["feature"] = r.pop("representation")
-        
-        return pd.DataFrame(results) if results else pd.DataFrame([{
-            "dataset_id": dataset_id,
-            "skip_reason": "all_folds_degenerate",
-        }])
-    
+
+        return (
+            pd.DataFrame(results)
+            if results
+            else pd.DataFrame(
+                [
+                    {
+                        "dataset_id": dataset_id,
+                        "skip_reason": "all_folds_degenerate",
+                    }
+                ]
+            )
+        )
+
     except Exception as e:
         logger.error(f"[FAILED] {dataset_id}: {e}")
-        return pd.DataFrame([{
-            "dataset_id": dataset_id,
-            "error": str(e),
-            "error_type": type(e).__name__,
-            "traceback": traceback.format_exc(),
-        }])
+        return pd.DataFrame(
+            [
+                {
+                    "dataset_id": dataset_id,
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                    "traceback": traceback.format_exc(),
+                }
+            ]
+        )
     finally:
         gc.collect()
+
 
 # =============================================================================
 # RESUME LOGIC
@@ -498,7 +577,9 @@ def get_completed_tasks(temp_dir: str, retry_errors: bool = True) -> set[str]:
     return completed
 
 
-def flush_results(buffer: list[pd.DataFrame], temp_dir: str, logger: logging.Logger) -> None:
+def flush_results(
+    buffer: list[pd.DataFrame], temp_dir: str, logger: logging.Logger
+) -> None:
     """Flush results buffer to temp shard."""
     if not buffer:
         return
@@ -533,8 +614,12 @@ def main():
     ap = argparse.ArgumentParser(
         description="Celltype benchmark with multiple modes (standard/low_data/pseudobulk)"
     )
-    ap.add_argument("--celltype_manifest", required=True, help="Cell type manifest parquet")
-    ap.add_argument("--cache_dir", required=True, help="Cache directory with .h5ad files")
+    ap.add_argument(
+        "--celltype_manifest", required=True, help="Cell type manifest parquet"
+    )
+    ap.add_argument(
+        "--cache_dir", required=True, help="Cache directory with .h5ad files"
+    )
     ap.add_argument("--out_parquet", required=True, help="Output parquet path")
     ap.add_argument("--log_file", default="celltype_benchmark.log", help="Log file")
 
@@ -548,8 +633,12 @@ def main():
 
     # CV parameters
     ap.add_argument("--folds", type=int, default=5, help="CV folds (default: 5)")
-    ap.add_argument("--alpha", type=float, default=1e-5, help="L2 regularization (default: 1e-5)")
-    ap.add_argument("--random_state", type=int, default=0, help="Random seed (default: 0)")
+    ap.add_argument(
+        "--alpha", type=float, default=1e-5, help="L2 regularization (default: 1e-5)"
+    )
+    ap.add_argument(
+        "--random_state", type=int, default=0, help="Random seed (default: 0)"
+    )
     ap.add_argument(
         "--embeddings",
         nargs="+",
@@ -581,14 +670,26 @@ def main():
     )
 
     # Parallelization
-    ap.add_argument("--workers", type=int, default=4, help="Parallel workers (default: 4)")
+    ap.add_argument(
+        "--workers", type=int, default=4, help="Parallel workers (default: 4)"
+    )
 
     # Other options
-    ap.add_argument("--task_limit", type=int, default=None, help="Limit datasets (for testing)")
-    ap.add_argument("--flush_every", type=int, default=5, help="Flush every N tasks (default: 5)")
-    ap.add_argument("--keep_temp", action="store_true", help="Keep temp shards after merge")
-    ap.add_argument("--no_resume", action="store_true", help="Disable checkpoint resume")
-    ap.add_argument("--no_retry_errors", action="store_true", help="Don't retry errors on resume")
+    ap.add_argument(
+        "--task_limit", type=int, default=None, help="Limit datasets (for testing)"
+    )
+    ap.add_argument(
+        "--flush_every", type=int, default=5, help="Flush every N tasks (default: 5)"
+    )
+    ap.add_argument(
+        "--keep_temp", action="store_true", help="Keep temp shards after merge"
+    )
+    ap.add_argument(
+        "--no_resume", action="store_true", help="Disable checkpoint resume"
+    )
+    ap.add_argument(
+        "--no_retry_errors", action="store_true", help="Don't retry errors on resume"
+    )
 
     args = ap.parse_args()
 
@@ -613,19 +714,25 @@ def main():
     # Resume logic
     completed_tasks = set()
     if not args.no_resume:
-        completed_tasks = get_completed_tasks(temp_dir, retry_errors=not args.no_retry_errors)
+        completed_tasks = get_completed_tasks(
+            temp_dir, retry_errors=not args.no_retry_errors
+        )
         if completed_tasks:
             logger.info(f"RESUME: Found {len(completed_tasks)} completed datasets")
             tasks_df = tasks_df[~tasks_df["dataset_id"].isin(completed_tasks)].copy()
 
     logger.info("=" * 80)
     logger.info(f"CELLTYPE BENCHMARK - Mode: {args.mode.upper()}")
-    logger.info(f"  Datasets remaining: {len(tasks_df)} (completed: {len(completed_tasks)})")
+    logger.info(
+        f"  Datasets remaining: {len(tasks_df)} (completed: {len(completed_tasks)})"
+    )
     logger.info(f"  Workers: {args.workers}")
     logger.info(f"  Cache: {args.cache_dir}")
     logger.info(f"  Output: {args.out_parquet}")
     if args.mode == "low_data":
-        logger.info(f"  Low-data: n_per_class={args.n_per_class}, n_bootstrap={args.n_bootstrap}")
+        logger.info(
+            f"  Low-data: n_per_class={args.n_per_class}, n_bootstrap={args.n_bootstrap}"
+        )
     elif args.mode == "pseudobulk":
         logger.info(f"  Pseudobulk: pooling={args.pooling}")
     logger.info("=" * 80)
@@ -638,21 +745,45 @@ def main():
     # Prepare task arguments based on mode
     if args.mode == "standard":
         task_args = [
-            (row, args.cache_dir, args.embeddings, args.folds, args.alpha, args.random_state)
+            (
+                row,
+                args.cache_dir,
+                args.embeddings,
+                args.folds,
+                args.alpha,
+                args.random_state,
+            )
             for _, row in tasks_df.iterrows()
         ]
         task_func = benchmark_one_task_standard
 
     elif args.mode == "low_data":
         task_args = [
-            (row, args.cache_dir, args.embeddings, args.folds, args.alpha, args.random_state, args.n_per_class, args.n_bootstrap)
+            (
+                row,
+                args.cache_dir,
+                args.embeddings,
+                args.folds,
+                args.alpha,
+                args.random_state,
+                args.n_per_class,
+                args.n_bootstrap,
+            )
             for _, row in tasks_df.iterrows()
         ]
         task_func = benchmark_one_task_lowdata
 
     elif args.mode == "pseudobulk":
         task_args = [
-            (row, args.cache_dir, args.embeddings, args.folds, args.alpha, args.random_state, args.pooling)
+            (
+                row,
+                args.cache_dir,
+                args.embeddings,
+                args.folds,
+                args.alpha,
+                args.random_state,
+                args.pooling,
+            )
             for _, row in tasks_df.iterrows()
         ]
         task_func = benchmark_one_task_pseudobulk
@@ -665,8 +796,7 @@ def main():
 
     with ProcessPoolExecutor(max_workers=args.workers) as executor:
         futures = {
-            executor.submit(task_func, arg): arg[0]["dataset_id"]
-            for arg in task_args
+            executor.submit(task_func, arg): arg[0]["dataset_id"] for arg in task_args
         }
 
         with tqdm(total=len(futures), desc="Processing") as pbar:
@@ -677,18 +807,28 @@ def main():
                     result_df = future.result()
                 except Exception as e:
                     logger.error(f"[EXECUTOR ERROR] {dataset_id}: {e}")
-                    result_df = pd.DataFrame([{
-                        "dataset_id": dataset_id,
-                        "error": str(e),
-                        "error_type": "executor_error",
-                    }])
+                    result_df = pd.DataFrame(
+                        [
+                            {
+                                "dataset_id": dataset_id,
+                                "error": str(e),
+                                "error_type": "executor_error",
+                            }
+                        ]
+                    )
 
                 if not result_df.empty:
                     buffer.append(result_df)
 
-                    if "error" in result_df.columns and result_df["error"].notna().any():
+                    if (
+                        "error" in result_df.columns
+                        and result_df["error"].notna().any()
+                    ):
                         n_failed += 1
-                    elif "skip_reason" in result_df.columns and result_df["skip_reason"].notna().any():
+                    elif (
+                        "skip_reason" in result_df.columns
+                        and result_df["skip_reason"].notna().any()
+                    ):
                         n_skipped += 1
                     else:
                         n_success += 1
@@ -707,7 +847,11 @@ def main():
     final_df = merge_shards(temp_dir, args.out_parquet, logger)
 
     # Summary
-    has_mcc = final_df["MCC"].notna() if "MCC" in final_df.columns else pd.Series(False, index=final_df.index)
+    has_mcc = (
+        final_df["MCC"].notna()
+        if "MCC" in final_df.columns
+        else pd.Series(False, index=final_df.index)
+    )
     logger.info("=" * 80)
     logger.info(f"COMPLETE! Output: {args.out_parquet} ({len(final_df)} rows)")
     logger.info(f"  Success: {final_df[has_mcc]['dataset_id'].nunique()} datasets")

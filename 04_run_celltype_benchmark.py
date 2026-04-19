@@ -32,10 +32,10 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import scanpy as sc
 from tqdm.auto import tqdm
 
 from benchmark import setup_logging
+from cache_io import load_and_concat_celltype_caches
 
 
 def get_cache_filename(dataset_id: str, cell_type: str) -> str:
@@ -142,18 +142,10 @@ def benchmark_one_task(args_tuple) -> pd.DataFrame:
             )
 
         # =====================================================================
-        # Load and concatenate cached files
+        # Load and concatenate cached files (identity-aware, rejects pre-v2)
         # =====================================================================
-        adatas = [sc.read_h5ad(p) for p in cache_paths]
-        if len(adatas) == 1:
-            adata = adatas[0]
-        else:
-            # Inner join: only genes present in all files (all non-zero in at
-            # least one cell type per file — effectively the full gene set minus
-            # genes that are all-zero within a particular cell type).
-            adata = sc.concat(adatas, join="inner", label=None)
-            del adatas
-            gc.collect()
+        adata = load_and_concat_celltype_caches(cache_paths)
+        gc.collect()
 
         log_resources(logger, f"[{task_id}] Post-load")
         logger.info(
@@ -240,6 +232,24 @@ def benchmark_one_task(args_tuple) -> pd.DataFrame:
                     }
                 ]
             )
+
+        # Suspicious-score warning: near-perfect MCC on multi-class raw features is
+        # the classic symptom of the pre-v2 cache column-alignment bug. Possible on
+        # clean tissues but worth flagging for review.
+        if n_cell_types >= 3:
+            for r in results:
+                mcc = r.get("MCC")
+                feat = r.get("feature", "")
+                if (
+                    mcc is not None
+                    and not pd.isna(mcc)
+                    and mcc > 0.98
+                    and feat.startswith("raw_")
+                ):
+                    logger.warning(
+                        f"[SUSPICIOUS] {task_id} {feat} MCC={mcc:.4f} on "
+                        f"{n_cell_types}-class task — verify cache integrity."
+                    )
 
         log_resources(logger, f"[{task_id}] Complete")
         logger.info(f"[SUCCESS] {task_id}: {len(results)} fold-feature combinations")
