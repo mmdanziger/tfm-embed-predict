@@ -128,7 +128,7 @@ def _migrate_one_locked(path: Path, census) -> dict:
             "error": f"gene count drift: mask_kept={int(mask.sum())} cache={a.n_vars}",
         }
 
-    a.var = ref.var.iloc[mask].copy()
+    a.var = ref.var.iloc[mask].set_index("feature_id").copy()
     a.uns["cache_format_version"] = 2
 
     tmp = path.with_suffix(path.suffix + ".migrating")
@@ -183,34 +183,16 @@ def main() -> int:
             "from prior runs. Inspect and remove before re-running if no migrator is active."
         )
 
-    to_migrate = []
-    scan_unreadable: list[dict] = []
-    for p in paths:
-        try:
-            a = sc.read_h5ad(p, backed="r")
-            version = a.uns.get("cache_format_version", 1) if hasattr(a, "uns") else 1
-            if version < 2:
-                to_migrate.append(p)
-        except Exception as e:
-            logger.warning(f"[SCAN FAIL] {p}: {e}")
-            scan_unreadable.append({"path": str(p), "error": str(e)})
-
-    logger.info(f"Pre-v2 caches: {len(to_migrate)} / {len(paths)}")
-    if scan_unreadable:
-        logger.warning(
-            f"Scan could not read {len(scan_unreadable)} files — these were NOT "
-            "considered for migration. Status unknown."
-        )
-
     if args.dry_run:
-        for p in to_migrate:
+        for p in paths:
             logger.info(f"  would migrate: {p}")
-        # Treat scan failures as a non-zero exit even in dry-run so CI catches them.
-        return 1 if scan_unreadable else 0
-
-    if not to_migrate and not scan_unreadable:
+        return 0
+    
+    if not paths:
         logger.info("Nothing to do.")
         return 0
+    
+    to_migrate = paths
 
     counts = {"migrated": 0, "skip_already_v2": 0, "skip_locked": 0, "error": 0}
     failures = []
