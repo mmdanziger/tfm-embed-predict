@@ -15,6 +15,7 @@ from sklearn.linear_model import SGDClassifier
 from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.preprocessing import MaxAbsScaler, StandardScaler
 from typing import Dict, List, Tuple, Optional, Callable
+from sklearn.random_projection import SparseRandomProjection
 
 from metrics import compute_donor_metrics, compute_metrics
 
@@ -158,6 +159,22 @@ def extract_embedding(embedding_matrix, train_idx, test_idx):
     X_test = scaler.transform(embedding_matrix[test_idx])
     return X_train, X_test
 
+# Sanity-check baseline: random projection should perform poorly.
+# If it matches raw_lognorm/PCA, something is wrong with the setup.
+def extract_random_proj(X_lognorm, train_idx, test_idx, n_components=50, random_state=0):
+    rp = SparseRandomProjection(
+        n_components=n_components,
+        dense_output=True,
+        random_state=random_state,
+    )
+    rp.fit(X_lognorm[train_idx[:1]].astype(np.float64))
+    X_train = rp.transform(X_lognorm[train_idx].astype(np.float64))
+    X_test  = rp.transform(X_lognorm[test_idx].astype(np.float64))
+    scaler = StandardScaler()
+    X_train = scaler.fit_transform(X_train)
+    X_test  = scaler.transform(X_test)
+    return X_train, X_test
+
 
 def build_representations(adata, embedding_keys=None):
     """
@@ -174,6 +191,8 @@ def build_representations(adata, embedding_keys=None):
     reps = {
         "raw_lognorm": extract_raw,
         "raw_pca50": lambda X, tr, te: extract_pca(X, tr, te, n_components=50),
+        "random_proj50": lambda X, tr, te: extract_random_proj(X, tr, te, n_components=50),
+
     }
 
     if embedding_keys:
