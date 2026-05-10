@@ -14,7 +14,6 @@ from sklearn.decomposition import TruncatedSVD
 from sklearn.linear_model import SGDClassifier
 from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.preprocessing import MaxAbsScaler, StandardScaler
-from typing import Dict, List, Tuple, Optional, Callable
 from sklearn.random_projection import SparseRandomProjection
 
 from metrics import compute_donor_metrics, compute_metrics
@@ -159,9 +158,12 @@ def extract_embedding(embedding_matrix, train_idx, test_idx):
     X_test = scaler.transform(embedding_matrix[test_idx])
     return X_train, X_test
 
+
 # Sanity-check baseline: random projection should perform poorly.
 # If it matches raw_lognorm/PCA, something is wrong with the setup.
-def extract_random_proj(X_lognorm, train_idx, test_idx, n_components=50, random_state=0):
+def extract_random_proj(
+    X_lognorm, train_idx, test_idx, n_components=50, random_state=0
+):
     rp = SparseRandomProjection(
         n_components=n_components,
         dense_output=True,
@@ -169,10 +171,10 @@ def extract_random_proj(X_lognorm, train_idx, test_idx, n_components=50, random_
     )
     rp.fit(X_lognorm[train_idx[:1]].astype(np.float64))
     X_train = rp.transform(X_lognorm[train_idx].astype(np.float64))
-    X_test  = rp.transform(X_lognorm[test_idx].astype(np.float64))
+    X_test = rp.transform(X_lognorm[test_idx].astype(np.float64))
     scaler = StandardScaler()
     X_train = scaler.fit_transform(X_train)
-    X_test  = scaler.transform(X_test)
+    X_test = scaler.transform(X_test)
     return X_train, X_test
 
 
@@ -191,8 +193,9 @@ def build_representations(adata, embedding_keys=None):
     reps = {
         "raw_lognorm": extract_raw,
         "raw_pca50": lambda X, tr, te: extract_pca(X, tr, te, n_components=50),
-        "random_proj50": lambda X, tr, te: extract_random_proj(X, tr, te, n_components=50),
-
+        "random_proj50": lambda X, tr, te: extract_random_proj(
+            X, tr, te, n_components=50
+        ),
     }
 
     if embedding_keys:
@@ -206,6 +209,7 @@ def build_representations(adata, embedding_keys=None):
 
     return reps
 
+
 def fold_iterator(X, labels, sample_ids, n_folds, cv_folds=None, random_state: int = 0):
     if cv_folds is not None:
         for fold_id, test_samples in enumerate(cv_folds):
@@ -214,14 +218,13 @@ def fold_iterator(X, labels, sample_ids, n_folds, cv_folds=None, random_state: i
             yield fold_id, np.where(train_mask)[0], np.where(test_mask)[0]
     else:
         sgkf = StratifiedGroupKFold(
-            n_splits=n_folds,
-            shuffle=True,
-            random_state=random_state
+            n_splits=n_folds, shuffle=True, random_state=random_state
         )
         for fold_id, (train_idx, test_idx) in enumerate(
             sgkf.split(X, labels, groups=sample_ids)
         ):
             yield fold_id, train_idx, test_idx
+
 
 # =============================================================================
 # Core Prediction Function
@@ -233,13 +236,12 @@ def run_predictions(
     label_col: str,
     representations: dict,
     n_folds: int = 5,
-    
     alpha: float = 1e-5,
     donor_col: str = "donor_id",
     stratify_col: str = None,
     random_state: int = 0,
     preprocess: bool = True,
-    cv_folds: Optional[List[List[str]]] = None,
+    cv_folds: list[list[str]] | None = None,
     **metadata,
 ) -> pd.DataFrame:
     """
@@ -282,62 +284,71 @@ def run_predictions(
         # Data already preprocessed (e.g., from cache)
         X_lognorm = adata.X if sparse.issparse(adata.X) else sparse.csr_matrix(adata.X)
 
-    #labels = adata.obs[label_col].values
-    #labels = adata.obs["disease"].astype(str).values
+    # labels = adata.obs[label_col].values
+    # labels = adata.obs["disease"].astype(str).values
     labels = np.array(adata.obs[label_col], dtype=str)
     donor_ids = adata.obs[donor_col].values
-    #stratify_labels = adata.obs[stratify_col].values if stratify_col else labels
-    stratify_labels = np.array(adata.obs[stratify_col], dtype=str) if stratify_col else labels
+    # stratify_labels = adata.obs[stratify_col].values if stratify_col else labels
+    stratify_labels = (
+        np.array(adata.obs[stratify_col], dtype=str) if stratify_col else labels
+    )
 
-    
-    
-    
     # ---- encode ----
-    #from sklearn.preprocessing import LabelEncoder
-    #label_encoder = LabelEncoder()
-    #y_ = label_encoder.fit_transform(labels)
-    
-    #logger.info(
+    # from sklearn.preprocessing import LabelEncoder
+    # label_encoder = LabelEncoder()
+    # y_ = label_encoder.fit_transform(labels)
+
+    # logger.info(
     #    f"Label mapping: {dict(enumerate(label_encoder.classes_))}"
-    #)
+    # )
 
     results = []
     n_per_class = metadata.pop("n_per_class", None)
     random_seed_base = metadata.get("bootstrap", 0) + random_state
 
-    assert stratify_labels.dtype == object or np.issubdtype(stratify_labels.dtype, np.str_), \
-        f"stratify_labels dtype={stratify_labels.dtype}, values={np.unique(stratify_labels)}"    
+    assert stratify_labels.dtype == object or np.issubdtype(
+        stratify_labels.dtype, np.str_
+    ), (
+        f"stratify_labels dtype={stratify_labels.dtype}, values={np.unique(stratify_labels)}"
+    )
     for fold_id, train_idx, test_idx in fold_iterator(
-            X_lognorm, stratify_labels, donor_ids, n_folds, cv_folds, random_state
-        ):
+        X_lognorm, stratify_labels, donor_ids, n_folds, cv_folds, random_state
+    ):
         y_train = labels[train_idx]
-        y_test  = labels[test_idx]
+        y_test = labels[test_idx]
         donors_test = donor_ids[test_idx]
-        #import pdb; pdb.set_trace()
+        # import pdb; pdb.set_trace()
         ### downsample X
-        
 
         if n_per_class is not None:
             train_idx, all_classes_met = downsample_to_n_per_class(
                 train_idx=train_idx,
                 y_train=y_train,
                 n_per_class=n_per_class,
-                random_state=random_seed_base + fold_id,  # unique per fold AND bootstrap,
+                random_state=random_seed_base
+                + fold_id,  # unique per fold AND bootstrap,
                 logger=logger,
             )
             y_train = labels[train_idx]
-        ###     
-        
+        ###
+
         fold_name = f"fold_{fold_id + 1}"
         logger.info(
             f"  {fold_name}: {len(train_idx)} train, {len(test_idx)} test cells"
         )
-        #if fold_id==2: import pdb; pdb.set_trace()
+        # if fold_id==2: import pdb; pdb.set_trace()
         # For each representation
         for rep_name, extractor in representations.items():
             try:
                 # Extract features
                 X_train, X_test = extractor(X_lognorm, train_idx, test_idx)
+
+                # Adaptive early stopping: only if we have enough samples to
+                # satisfy StratifiedShuffleSplit(validation_fraction=0.1)
+                # for the number of classes present.
+                n_classes = len(np.unique(y_train))
+                validation_fraction = 0.1
+                can_early_stop = len(y_train) > (n_classes / validation_fraction)
 
                 # Train classifier
                 clf = SGDClassifier(
@@ -346,7 +357,8 @@ def run_predictions(
                     class_weight="balanced",
                     max_iter=2000,
                     random_state=random_state,
-                    early_stopping=len(y_train) >= 50,  # Adaptive
+                    early_stopping=can_early_stop,
+                    validation_fraction=validation_fraction,
                 )
                 clf.fit(X_train, y_train)
 
@@ -369,7 +381,6 @@ def run_predictions(
                         "using predict-only metrics"
                     )
                     y_proba = None
-                
 
                 # Compute metrics (handle case where probabilities unavailable)
                 cell_metrics = compute_metrics(y_test, y_proba, y_pred, clf.classes_)
@@ -383,7 +394,7 @@ def run_predictions(
                         "representation": rep_name,
                         "n_train": len(train_idx),
                         "n_test": len(test_idx),
-                        "n_per_class":n_per_class,
+                        "n_per_class": n_per_class,
                         **metadata,
                         **cell_metrics,
                         **donor_metrics,
@@ -412,18 +423,18 @@ def downsample_to_n_per_class(
     y_train: np.ndarray,
     n_per_class: int,
     random_state: int,
-    logger: logging.Logger
-) -> Tuple[np.ndarray, bool]:
+    logger: logging.Logger,
+) -> tuple[np.ndarray, bool]:
     """Downsample training data to N samples per class."""
     rng = np.random.RandomState(random_state)
     selected_idx = []
     all_classes_met = True
-    
+
     for class_label in np.unique(y_train):
         class_mask = y_train == class_label
         class_indices = train_idx[class_mask]
         n_available = len(class_indices)
-        
+
         if n_available < n_per_class:
             logger.warning(
                 f"    Class {class_label}: only {n_available}/{n_per_class} available"
@@ -433,7 +444,7 @@ def downsample_to_n_per_class(
         else:
             selected = rng.choice(class_indices, size=n_per_class, replace=False)
             selected_idx.extend(selected)
-    
+
     return np.array(selected_idx), all_classes_met
 
 
@@ -443,7 +454,7 @@ def run_predictions_downsampled(
     representations: dict,
     n_per_class_list: list,
     n_bootstrap: int = 10,
-    cv_folds: Optional[List[List[str]]] = None,
+    cv_folds: list[list[str]] | None = None,
     **kwargs,
 ) -> pd.DataFrame:
     """
