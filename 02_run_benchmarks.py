@@ -75,7 +75,7 @@ def validate_task_feasibility(
     stats = {
         "n_classes": n_classes,
         "n_donors": n_donors,
-        "min_donors_per_class": min_donors,
+        "min_donors_per_stratum": min_donors,
     }
 
     if n_classes < 2:
@@ -187,9 +187,15 @@ def fetch_single_task_with_census(
 
 def run_single_task_standard(args_tuple) -> list[dict]:
     """Run standard CV benchmark on a single cached task. Returns list of result dicts."""
-    cache_path, embedding_keys, n_splits, alpha, pca_components, random_state = (
-        args_tuple
-    )
+    (
+        cache_path,
+        embedding_keys,
+        n_splits,
+        alpha,
+        pca_components,
+        random_state,
+        min_donors_per_stratum,
+    ) = args_tuple
 
     try:
         from benchmark import build_representations, run_predictions
@@ -201,19 +207,9 @@ def run_single_task_standard(args_tuple) -> list[dict]:
         cell_type = adata.obs["cell_type"].iloc[0]
         n_genes = adata.X.shape[1]
 
-        # Check if we have enough donors for CV
-        donors = adata.obs["donor_id"].astype(str).values
-        n_donors = len(np.unique(donors))
-        k_folds = min(n_splits, n_donors)
-
-        if k_folds < 2:
-            return [
-                {
-                    "dataset_id": dataset_id,
-                    "cell_type": cell_type,
-                    "skip_reason": "too_few_donors_for_cv",
-                }
-            ]
+        # Manifest guarantees min_donors_per_stratum >= 2; cap folds by it so
+        # StratifiedGroupKFold never sees a stratum with fewer donors than splits.
+        k_folds = min(n_splits, int(min_donors_per_stratum))
 
         # Build representations (raw, PCA, embeddings)
         representations = build_representations(adata, embedding_keys=embedding_keys)
@@ -272,6 +268,7 @@ def run_single_task_lowdata(args_tuple) -> list[dict]:
         random_state,
         n_per_class,
         n_bootstrap,
+        min_donors_per_stratum,
     ) = args_tuple
 
     try:
@@ -284,19 +281,7 @@ def run_single_task_lowdata(args_tuple) -> list[dict]:
         cell_type = adata.obs["cell_type"].iloc[0]
         n_genes = adata.X.shape[1]
 
-        # Check if we have enough donors for CV
-        donors = adata.obs["donor_id"].astype(str).values
-        n_donors = len(np.unique(donors))
-        k_folds = min(n_splits, n_donors)
-
-        if k_folds < 2:
-            return [
-                {
-                    "dataset_id": dataset_id,
-                    "cell_type": cell_type,
-                    "skip_reason": "too_few_donors_for_cv",
-                }
-            ]
+        k_folds = min(n_splits, int(min_donors_per_stratum))
 
         # Build representations
         representations = build_representations(adata, embedding_keys=embedding_keys)
@@ -353,6 +338,7 @@ def run_single_task_pseudobulk(args_tuple) -> list[dict]:
         pca_components,
         random_state,
         pooling,
+        min_donors_per_stratum,
     ) = args_tuple
 
     try:
@@ -373,17 +359,7 @@ def run_single_task_pseudobulk(args_tuple) -> list[dict]:
             disease_col="disease",
         )
 
-        n_donors = adata_pb.n_obs
-        k_folds = min(n_splits, n_donors)
-
-        if k_folds < 2:
-            return [
-                {
-                    "dataset_id": dataset_id,
-                    "cell_type": cell_type,
-                    "skip_reason": "too_few_donors_for_cv_after_pseudobulk",
-                }
-            ]
+        k_folds = min(n_splits, int(min_donors_per_stratum))
 
         n_genes = adata_pb.X.shape[1]
 
@@ -659,6 +635,11 @@ def main():
     remaining_df = tasks_df[~tasks_df["task_id"].isin(completed_tasks)].copy()
     logger.info(f"Tasks to process: {len(remaining_df)}")
 
+    # Manifest is the source of truth for per-task fold feasibility.
+    min_donors_per_stratum_lookup = dict(
+        zip(tasks_df["task_id"], tasks_df["min_donors_per_stratum"])
+    )
+
     if len(remaining_df) == 0:
         logger.info("All tasks complete. Merging shards...")
         merge_shards(temp_dir, args.out_parquet, logger)
@@ -775,7 +756,9 @@ def main():
         merge_shards(temp_dir, args.out_parquet, logger)
         return
 
-    # Prepare compute args based on mode
+    # Prepare compute args based on mode. Each task carries its own
+    # min_donors_per_stratum (from the manifest) so the worker can cap folds
+    # without re-deriving feasibility.
     if args.mode == "standard":
         compute_args = [
             (
@@ -785,8 +768,9 @@ def main():
                 args.alpha,
                 args.pca_components,
                 args.random_state,
+                min_donors_per_stratum_lookup[task_id],
             )
-            for path in tasks_to_compute.values()
+            for task_id, path in tasks_to_compute.items()
         ]
         task_func = run_single_task_standard
 
@@ -801,8 +785,9 @@ def main():
                 args.random_state,
                 args.n_per_class,
                 args.n_bootstrap,
+                min_donors_per_stratum_lookup[task_id],
             )
-            for path in tasks_to_compute.values()
+            for task_id, path in tasks_to_compute.items()
         ]
         task_func = run_single_task_lowdata
 
@@ -816,8 +801,9 @@ def main():
                 args.pca_components,
                 args.random_state,
                 args.pooling,
+                min_donors_per_stratum_lookup[task_id],
             )
-            for path in tasks_to_compute.values()
+            for task_id, path in tasks_to_compute.items()
         ]
         task_func = run_single_task_pseudobulk
 

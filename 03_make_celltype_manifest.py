@@ -72,6 +72,7 @@ def make_celltype_manifest(
         disease_tasks.groupby(["dataset_id", "cell_type"])
         .agg(
             n_cells_celltype=("n_cells", "first"),
+            min_donors_per_stratum=("min_donors_per_stratum", "first"),
         )
         .reset_index()
     )
@@ -84,6 +85,11 @@ def make_celltype_manifest(
             cell_types=("cell_type", lambda x: sorted(x.unique())),
             total_cells=("n_cells_celltype", "sum"),
             min_cells_per_celltype=("n_cells_celltype", "min"),
+            # Conservative lower bound on dataset-level disease-stratum donor
+            # count after concatenating all cell types: min over cell types of
+            # the per-(dataset, cell_type) min. Actual could be higher (union
+            # of donors across cell types), never lower.
+            min_donors_per_stratum=("min_donors_per_stratum", "min"),
         )
         .reset_index()
     )
@@ -174,6 +180,7 @@ def make_celltype_manifest(
         "n_cell_types",
         "n_cells",
         "n_donors",
+        "min_donors_per_stratum",
         "min_cells_per_celltype",
         "n_cells_per_donor",
         "n_diseases",

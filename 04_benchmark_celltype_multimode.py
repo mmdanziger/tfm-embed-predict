@@ -39,33 +39,6 @@ def get_cache_filename(dataset_id: str, cell_type: str) -> str:
     return f"{dataset_id}_{safe_ct}.h5ad"
 
 
-def validate_task_feasibility(
-    y: np.ndarray,
-    donors: np.ndarray,
-) -> tuple[bool, str, dict]:
-    """Validates that a task can be successfully cross-validated."""
-    donor_class = {}
-    for d, label in zip(donors, y):
-        if d not in donor_class:
-            donor_class[d] = set()
-        donor_class[d].add(label)
-
-    n_donors = len(donor_class)
-    n_classes = len(np.unique(y))
-
-    stats = {
-        "n_classes": n_classes,
-        "n_donors": n_donors,
-    }
-
-    if n_donors < 2:
-        return False, "total_donors_lt2", stats
-    if n_classes < 2:
-        return False, "total_classes_lt2", stats
-
-    return True, "ok", stats
-
-
 # =============================================================================
 # MODE-SPECIFIC BENCHMARK FUNCTIONS
 # =============================================================================
@@ -108,29 +81,9 @@ def benchmark_one_task_standard(args_tuple) -> pd.DataFrame:
         if adata.n_obs == 0:
             return pd.DataFrame([{"dataset_id": dataset_id, "skip_reason": "no_cells"}])
 
-        # Validate
-        y = adata.obs["cell_type"].astype(str).values
-        donors = adata.obs["donor_id"].astype(str).values
-        n_cell_types = len(np.unique(y))
-        n_donors = len(np.unique(donors))
+        n_cell_types = int(adata.obs["cell_type"].nunique())
         n_genes = adata.n_vars
-
-        if n_cell_types < 2:
-            return pd.DataFrame(
-                [{"dataset_id": dataset_id, "skip_reason": "too_few_celltypes"}]
-            )
-
-        is_feasible, reason, stats = validate_task_feasibility(y, donors)
-        if not is_feasible:
-            return pd.DataFrame(
-                [{"dataset_id": dataset_id, "skip_reason": reason, **stats}]
-            )
-
-        k_folds = min(n_splits, n_donors)
-        if k_folds < 2:
-            return pd.DataFrame(
-                [{"dataset_id": dataset_id, "skip_reason": "too_few_donors"}]
-            )
+        k_folds = min(n_splits, int(task_row["min_donors_per_stratum"]))
 
         # Run benchmark
         from benchmark import build_representations, run_predictions
@@ -230,29 +183,9 @@ def benchmark_one_task_lowdata(args_tuple) -> pd.DataFrame:
         if adata.n_obs == 0:
             return pd.DataFrame([{"dataset_id": dataset_id, "skip_reason": "no_cells"}])
 
-        # Validate
-        y = adata.obs["cell_type"].astype(str).values
-        donors = adata.obs["donor_id"].astype(str).values
-        n_cell_types = len(np.unique(y))
-        n_donors = len(np.unique(donors))
+        n_cell_types = int(adata.obs["cell_type"].nunique())
         n_genes = adata.n_vars
-
-        if n_cell_types < 2:
-            return pd.DataFrame(
-                [{"dataset_id": dataset_id, "skip_reason": "too_few_celltypes"}]
-            )
-
-        is_feasible, reason, stats = validate_task_feasibility(y, donors)
-        if not is_feasible:
-            return pd.DataFrame(
-                [{"dataset_id": dataset_id, "skip_reason": reason, **stats}]
-            )
-
-        k_folds = min(n_splits, n_donors)
-        if k_folds < 2:
-            return pd.DataFrame(
-                [{"dataset_id": dataset_id, "skip_reason": "too_few_donors"}]
-            )
+        k_folds = min(n_splits, int(task_row["min_donors_per_stratum"]))
 
         # Run low-data benchmark
         from benchmark import build_representations, run_predictions_downsampled
@@ -445,34 +378,9 @@ def benchmark_one_task_pseudobulk(args_tuple) -> pd.DataFrame:
         del adata
         gc.collect()
 
-        # Validate
-        y = adata_pb.obs["cell_type"].astype(str).values
-        donors = adata_pb.obs["donor_id"].astype(str).values
-        n_cell_types = len(np.unique(y))
-        n_donors = len(np.unique(donors))
+        n_cell_types = int(adata_pb.obs["cell_type"].nunique())
         n_genes = adata_pb.n_vars
-
-        if n_cell_types < 2:
-            return pd.DataFrame(
-                [
-                    {
-                        "dataset_id": dataset_id,
-                        "skip_reason": "too_few_celltypes_after_pseudobulk",
-                    }
-                ]
-            )
-
-        is_feasible, reason, stats = validate_task_feasibility(y, donors)
-        if not is_feasible:
-            return pd.DataFrame(
-                [{"dataset_id": dataset_id, "skip_reason": reason, **stats}]
-            )
-
-        k_folds = min(n_splits, n_donors)
-        if k_folds < 2:
-            return pd.DataFrame(
-                [{"dataset_id": dataset_id, "skip_reason": "too_few_donors"}]
-            )
+        k_folds = min(n_splits, int(task_row["min_donors_per_stratum"]))
 
         # Run benchmark on pseudobulk
         from benchmark import build_representations, run_predictions
