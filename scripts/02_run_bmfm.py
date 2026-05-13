@@ -77,15 +77,13 @@ def run_one(
 
     cmd = [
         "bmfm-targets-run",
-        "-cn", "predict_benchmark",
+        "-cn", "predict",
         f"input_file={input_path}",
         f"working_dir={work_dir}",
-        "++data_module.rda_transform=auto_align",
-        "data_module.log_normalize_transform=false",
-        "data_module.max_length=4096",
-        "data_module.collation_strategy=language_modeling",
         f"checkpoint={checkpoint}",
+        "trainer.pooling_method=first_token",
     ]
+
     logger.debug(f"[{dataset_id}] Running: {' '.join(cmd)}")
 
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -162,13 +160,10 @@ def main():
         for f in input_files:
             work_dir = output_dir / f.stem
             print(
-                f"  would run: bmfm-targets-run -cn predict_benchmark"
+                f"  would run: bmfm-targets-run -cn predict "
                 f"input_file={f} working_dir={work_dir} "
-                f"++data_module.rda_transform=auto_align "
-                f"data_module.log_normalize_transform=false "
-                f"data_module.max_length=4096 "
-                f"data_module.collation_strategy=language_modeling "
-                f"checkpoint={args.checkpoint}"
+                f"checkpoint={args.checkpoint} "
+                f"trainer.pooling_method=first_token"
             )
         print(f"\n[dry_run] {len(input_files)} datasets would be processed.")
         return
