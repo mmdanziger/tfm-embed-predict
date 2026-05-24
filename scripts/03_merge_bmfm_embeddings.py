@@ -79,40 +79,18 @@ def get_cache_filename(dataset_id: str, cell_type: str) -> str:
 
 
 def load_bmfm_output(bmfm_work_dir: Path, logger: logging.Logger) -> tuple[np.ndarray, dict]:
-    """
-    Load BMFM predictions for a dataset.
-    Returns (embedding_matrix, soma_joinid_to_row) where:
-      - embedding_matrix shape: (n_cells, embed_dim)
-      - soma_joinid_to_row: dict mapping soma_joinid string → row index
-    obs_names of BMFM output are soma_joinid strings (set by script 1).
-    """
-    from bmfm_targets.evaluation.embeddings import load_predictions  # type: ignore
+    embeddings_path = bmfm_work_dir / "embeddings.csv"
+    if not embeddings_path.exists():
+        raise FileNotFoundError(f"embeddings.csv not found in {bmfm_work_dir}")
 
-    predictions = load_predictions(working_dir=str(bmfm_work_dir))
-    bmfm_adata  = predictions["adata"]
+    df = pd.read_csv(embeddings_path, index_col=0, header=None)
+    df.index = df.index.astype(str)
 
-    # Pick embedding key
-    candidate_keys = [
-        k for k in bmfm_adata.obsm
-        if "embedding" in k.lower() or k.startswith("X_")
-    ]
-    if not candidate_keys:
-        candidate_keys = list(bmfm_adata.obsm.keys())
-    if not candidate_keys:
-        raise RuntimeError(f"No embeddings found in BMFM output at {bmfm_work_dir}")
+    embedding = df.values.astype(np.float32)
+    soma_joinid_to_row = {jid: i for i, jid in enumerate(df.index.tolist())}
 
-    chosen_key = candidate_keys[0]
-    logger.debug(f"  Using BMFM obsm key: '{chosen_key}'")
-
-    embedding = np.array(bmfm_adata.obsm[chosen_key], dtype=np.float32)
-
-    # obs_names are soma_joinid strings - build lookup dict
-    soma_joinid_to_row = {
-        str(jid): i for i, jid in enumerate(bmfm_adata.obs_names.tolist())
-    }
-
+    logger.debug(f"  loaded embeddings {embedding.shape} from {embeddings_path.name}")
     return embedding, soma_joinid_to_row
-
 
 # ---------------------------------------------------------------------------
 # Merge one cache file
