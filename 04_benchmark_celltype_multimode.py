@@ -550,7 +550,7 @@ def main():
     ap.add_argument(
         "--embeddings",
         nargs="+",
-        default=["scvi", "geneformer", "tf-sapiens", "tf-exemplar-human"],
+        default=["scvi", "geneformer", "tf-sapiens", "tf-exemplar-human", "bmfm"],
         help="Embedding keys",
     )
 
@@ -628,6 +628,19 @@ def main():
         if completed_tasks:
             logger.info(f"RESUME: Found {len(completed_tasks)} completed datasets")
             tasks_df = tasks_df[~tasks_df["dataset_id"].isin(completed_tasks)].copy()
+
+    # Exclude large datasets (run separately with --workers 1 --mem 500G)
+    LARGE_DATASET_IDS = [
+        '6f7fd0f1-a2ed-4ff1-80d3-33dde731cbc3',
+        'd3cb449b-c2b1-4b50-a7f1-21203535fe61',
+        'c2876b1b-06d8-4d96-a56b-5304f815b99a',
+        '9dbab10c-118d-496b-966a-67f1763a6b7d',
+
+    ]
+    tasks_df = tasks_df[~tasks_df["dataset_id"].isin(LARGE_DATASET_IDS)].reset_index(drop=True)
+    logger.info(f"Excluded {len(LARGE_DATASET_IDS)} large datasets (will run separately)")
+    #tasks_df = tasks_df[tasks_df["dataset_id"].isin(LARGE_DATASET_IDS)].reset_index(drop=True)
+    #logger.info(f"Only {len(LARGE_DATASET_IDS)} large datasets ")
 
     logger.info("=" * 80)
     logger.info(f"CELLTYPE BENCHMARK - Mode: {args.mode.upper()}")
