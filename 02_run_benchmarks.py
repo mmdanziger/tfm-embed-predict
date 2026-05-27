@@ -521,7 +521,7 @@ def main():
     ap.add_argument(
         "--embeddings",
         nargs="+",
-        default=["scvi", "geneformer", "tf-sapiens", "tf-exemplar-human"],
+        default=["scvi", "geneformer", "tf-sapiens", "tf-exemplar-human", "bmfm"],
     )
     ap.add_argument(
         "--cache_dir", default="./_adata_cache", help="Directory for cached .h5ad files"

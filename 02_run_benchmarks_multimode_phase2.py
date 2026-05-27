@@ -130,9 +130,15 @@ def run_single_task_standard(args_tuple) -> list[dict]:
     """
     Run STANDARD CV benchmark on a single cached task.
     """
-    cache_path, embedding_keys, n_splits, alpha, pca_components, random_state = (
-        args_tuple
-    )
+    (
+        cache_path,
+        embedding_keys,
+        n_splits,
+        alpha,
+        pca_components,
+        random_state,
+        min_donors_per_stratum,
+    ) = args_tuple
 
     try:
         import time
@@ -145,19 +151,9 @@ def run_single_task_standard(args_tuple) -> list[dict]:
         cell_type = adata.obs["cell_type"].iloc[0]
         n_genes = adata.X.shape[1]
 
-        # Check if we have enough donors for CV
-        donors = adata.obs["donor_id"].astype(str).values
-        n_donors = len(np.unique(donors))
-        k_folds = min(n_splits, n_donors)
-
-        if k_folds < 2:
-            return [
-                {
-                    "dataset_id": dataset_id,
-                    "cell_type": cell_type,
-                    "skip_reason": "too_few_donors_for_cv",
-                }
-            ]
+        # Manifest guarantees min_donors_per_stratum >= 2; cap folds by it so
+        # StratifiedGroupKFold never sees a stratum with fewer donors than splits.
+        k_folds = min(n_splits, int(min_donors_per_stratum))
 
         # Build representations (raw, PCA, embeddings)
         representations = build_representations(adata, embedding_keys=embedding_keys)
@@ -224,6 +220,7 @@ def run_single_task_lowdata(args_tuple) -> list[dict]:
         random_state,
         n_per_class_list,
         n_bootstrap,
+        min_donors_per_stratum,
     ) = args_tuple
 
     try:
@@ -237,19 +234,7 @@ def run_single_task_lowdata(args_tuple) -> list[dict]:
         cell_type = adata.obs["cell_type"].iloc[0]
         n_genes = adata.X.shape[1]
 
-        # Check if we have enough donors for CV
-        donors = adata.obs["donor_id"].astype(str).values
-        n_donors = len(np.unique(donors))
-        k_folds = min(n_splits, n_donors)
-
-        if k_folds < 2:
-            return [
-                {
-                    "dataset_id": dataset_id,
-                    "cell_type": cell_type,
-                    "skip_reason": "too_few_donors_for_cv",
-                }
-            ]
+        k_folds = min(n_splits, int(min_donors_per_stratum))
 
         # Build representations (raw, PCA, embeddings)
         representations = build_representations(adata, embedding_keys=embedding_keys)
@@ -316,6 +301,7 @@ def run_single_task_pseudobulk(args_tuple) -> list[dict]:
         pca_components,
         random_state,
         pooling,
+        min_donors_per_stratum,
     ) = args_tuple
 
     try:
@@ -333,7 +319,7 @@ def run_single_task_pseudobulk(args_tuple) -> list[dict]:
         # Check if we have enough donors for CV
         donors = adata.obs["donor_id"].astype(str).values
         n_donors = len(np.unique(donors))
-        k_folds = min(n_splits, n_donors)
+        k_folds = min(n_splits, int(min_donors_per_stratum))
 
         if k_folds < 2:
             return [
@@ -460,7 +446,7 @@ Examples:
     ap.add_argument(
         "--embeddings",
         nargs="+",
-        default=None,
+        default=["scvi", "geneformer", "tf-sapiens", "tf-exemplar-human", "bmfm"],
         help="Embedding keys to use from obsm",
     )
 
@@ -589,9 +575,14 @@ Examples:
         logger.info(f"  Using task manifest: {args.tasks_manifest}")
         tasks_df = pd.read_parquet(args.tasks_manifest)
         tasks_df["task_id"] = tasks_df["dataset_id"] + "::" + tasks_df["cell_type"]
-        
+
         logger.info(f"  Tasks in manifest: {len(tasks_df)}")
-        
+
+        # Manifest is the source of truth for per-task fold feasibility.
+        min_donors_per_stratum_lookup = dict(
+            zip(tasks_df["task_id"], tasks_df["min_donors_per_stratum"])
+        )
+
         # Build cache paths from manifest
         remaining_files = []
         for _, row in tasks_df.iterrows():
@@ -599,35 +590,37 @@ Examples:
             safe_ct = row["cell_type"].replace(" ", "_").replace("/", "_").replace(":", "_")
             cache_filename = f"{row['dataset_id']}_{safe_ct}.h5ad"
             cache_path = Path(args.cache_dir) / cache_filename
-            
+
             task_id = row["task_id"]
-            
+
             # Only process if: cache file exists AND not already computed
             if cache_path.exists() and task_id not in completed_tasks:
-                remaining_files.append(str(cache_path))
-        
+                remaining_files.append((str(cache_path), min_donors_per_stratum_lookup[task_id]))
+
         logger.info(f"  Tasks with cache files: {len([p for p in Path(args.cache_dir).glob('*.h5ad')])} (checked via manifest)")
         
     else:
         # SLOW: Scan cache directory and open files
         logger.info("  No manifest provided, scanning cache directory...")
         logger.warning("  This is SLOW! Consider using --tasks_manifest for faster startup.")
-        
+
         remaining_files = []
         for cache_path in cache_files:
             try:
-                # Slow: load just obs to get task ID
+                # Slow: load just obs to get task ID and donor count
                 adata = sc.read_h5ad(cache_path, backed="r")
                 dataset_id = str(adata.obs["dataset_id"].iloc[0])
                 cell_type = str(adata.obs["cell_type"].iloc[0])
                 task_id = f"{dataset_id}::{cell_type}"
+                donors = adata.obs["donor_id"].astype(str).values
+                n_donors = int(len(np.unique(donors)))
 
                 if task_id not in completed_tasks:
-                    remaining_files.append(cache_path)
+                    remaining_files.append((cache_path, n_donors))
             except Exception as e:
                 logger.warning(f"Could not read metadata from {cache_path}: {e}")
-                # Include it anyway - will error in processing if truly broken
-                remaining_files.append(cache_path)
+                # Include with a safe fallback donor count; will error in processing if truly broken
+                remaining_files.append((cache_path, 2))
 
     logger.info(f"  Files to process: {len(remaining_files)}")
 
@@ -651,7 +644,8 @@ Examples:
     compute_workers = args.compute_workers or os.cpu_count()
     logger.info(f"Using {compute_workers} parallel workers")
     
-    # Prepare task arguments based on mode
+    # Prepare task arguments based on mode. Each task carries its own
+    # min_donors_per_stratum so the worker can cap folds without re-deriving feasibility.
     if args.mode == "standard":
         task_args = [
             (
@@ -661,8 +655,9 @@ Examples:
                 args.alpha,
                 args.pca_components,
                 args.random_state,
+                min_donors,
             )
-            for cache_path in remaining_files
+            for cache_path, min_donors in remaining_files
         ]
         task_func = run_single_task_standard
     elif args.mode == "low_data":
@@ -676,8 +671,9 @@ Examples:
                 args.random_state,
                 args.n_per_class,
                 args.n_bootstrap,
+                min_donors,
             )
-            for cache_path in remaining_files
+            for cache_path, min_donors in remaining_files
         ]
         task_func = run_single_task_lowdata
 
@@ -691,8 +687,9 @@ Examples:
                 args.pca_components,
                 args.random_state,
                 args.pooling,
+                min_donors,
             )
-            for cache_path in remaining_files
+            for cache_path, min_donors in remaining_files
         ]
         task_func = run_single_task_pseudobulk
 
