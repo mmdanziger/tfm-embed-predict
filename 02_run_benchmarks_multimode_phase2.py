@@ -138,6 +138,7 @@ def run_single_task_standard(args_tuple) -> list[dict]:
         pca_components,
         random_state,
         min_donors_per_stratum,
+        baselines
     ) = args_tuple
 
     try:
@@ -156,7 +157,7 @@ def run_single_task_standard(args_tuple) -> list[dict]:
         k_folds = min(n_splits, int(min_donors_per_stratum))
 
         # Build representations (raw, PCA, embeddings)
-        representations = build_representations(adata, embedding_keys=embedding_keys)
+        representations = build_representations(adata, embedding_keys=embedding_keys, baselines=baselines)
 
         # Run benchmark using unified implementation
         t0 = time.perf_counter()
@@ -221,6 +222,7 @@ def run_single_task_lowdata(args_tuple) -> list[dict]:
         n_per_class_list,
         n_bootstrap,
         min_donors_per_stratum,
+        baselines
     ) = args_tuple
 
     try:
@@ -237,7 +239,7 @@ def run_single_task_lowdata(args_tuple) -> list[dict]:
         k_folds = min(n_splits, int(min_donors_per_stratum))
 
         # Build representations (raw, PCA, embeddings)
-        representations = build_representations(adata, embedding_keys=embedding_keys)
+        representations = build_representations(adata, embedding_keys=embedding_keys, baselines=baselines)
 
         # Run low-data benchmark
         t0 = time.perf_counter()
@@ -302,6 +304,7 @@ def run_single_task_pseudobulk(args_tuple) -> list[dict]:
         random_state,
         pooling,
         min_donors_per_stratum,
+        baselines
     ) = args_tuple
 
     try:
@@ -338,7 +341,7 @@ def run_single_task_pseudobulk(args_tuple) -> list[dict]:
         import gc; gc.collect()
 
         # Build representations (raw, PCA, embeddings)
-        representations = build_representations(adata_pb, embedding_keys=embedding_keys)
+        representations = build_representations(adata_pb, embedding_keys=embedding_keys, baselines=baselines)
 
         # Run benchmark on pseudobulk data
         t0 = time.perf_counter()
@@ -441,12 +444,18 @@ Examples:
         default="standard",
         help="Benchmark mode (default: standard)",
     )
-
+    
+    ap.add_argument(
+       "--baselines",
+        nargs="+",
+        default=None,
+        help="Baseline representations to include: raw_lognorm, raw_pca50, random_proj50. Default: all. Pass none to skip all.",
+    )
     # Embeddings
     ap.add_argument(
         "--embeddings",
         nargs="+",
-        default=["scvi", "geneformer", "tf-sapiens", "tf-exemplar-human", "bmfm"],
+        default=None,
         help="Embedding keys to use from obsm",
     )
 
@@ -533,6 +542,9 @@ Examples:
 
     args = ap.parse_args()
 
+    if args.baselines and len(args.baselines) == 1 and args.baselines[0].lower() == "none":
+    	args.baselines = []
+
     logger = setup_logging(args.log_file)
 
     # Setup paths
@@ -577,6 +589,19 @@ Examples:
         tasks_df["task_id"] = tasks_df["dataset_id"] + "::" + tasks_df["cell_type"]
 
         logger.info(f"  Tasks in manifest: {len(tasks_df)}")
+
+        # Large datasets - run separately with fewer workers and more memory.
+        LARGE_DATASET_IDS = [
+            '6f7fd0f1-a2ed-4ff1-80d3-33dde731cbc3',
+            'd3cb449b-c2b1-4b50-a7f1-21203535fe61',
+            'c2876b1b-06d8-4d96-a56b-5304f815b99a',
+            '9dbab10c-118d-496b-966a-67f1763a6b7d',
+        ]        
+        #tasks_df = tasks_df[~tasks_df["dataset_id"].isin(LARGE_DATASET_IDS)].reset_index(drop=True)
+        #logger.info(f"Excluded {len(LARGE_DATASET_IDS)} large datasets (will run separately)")
+        tasks_df = tasks_df[tasks_df["dataset_id"].isin(LARGE_DATASET_IDS)].reset_index(drop=True)
+        logger.info(f"Only {len(LARGE_DATASET_IDS)} large datasets ")
+
 
         # Manifest is the source of truth for per-task fold feasibility.
         min_donors_per_stratum_lookup = dict(
@@ -656,6 +681,7 @@ Examples:
                 args.pca_components,
                 args.random_state,
                 min_donors,
+                args.baselines,
             )
             for cache_path, min_donors in remaining_files
         ]
@@ -672,6 +698,7 @@ Examples:
                 args.n_per_class,
                 args.n_bootstrap,
                 min_donors,
+                args.baselines,
             )
             for cache_path, min_donors in remaining_files
         ]
@@ -688,6 +715,7 @@ Examples:
                 args.random_state,
                 args.pooling,
                 min_donors,
+                args.baselines,
             )
             for cache_path, min_donors in remaining_files
         ]

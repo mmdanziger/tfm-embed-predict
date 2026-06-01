@@ -195,6 +195,7 @@ def run_single_task_standard(args_tuple) -> list[dict]:
         pca_components,
         random_state,
         min_donors_per_stratum,
+        baselines
     ) = args_tuple
 
     try:
@@ -212,7 +213,7 @@ def run_single_task_standard(args_tuple) -> list[dict]:
         k_folds = min(n_splits, int(min_donors_per_stratum))
 
         # Build representations (raw, PCA, embeddings)
-        representations = build_representations(adata, embedding_keys=embedding_keys)
+        representations = build_representations(adata, embedding_keys=embedding_keys, baselines=baselines)
 
         # Run benchmark using unified implementation
         results_df = run_predictions(
@@ -269,6 +270,7 @@ def run_single_task_lowdata(args_tuple) -> list[dict]:
         n_per_class,
         n_bootstrap,
         min_donors_per_stratum,
+        baselines
     ) = args_tuple
 
     try:
@@ -284,7 +286,7 @@ def run_single_task_lowdata(args_tuple) -> list[dict]:
         k_folds = min(n_splits, int(min_donors_per_stratum))
 
         # Build representations
-        representations = build_representations(adata, embedding_keys=embedding_keys)
+        representations = build_representations(adata, embedding_keys=embedding_keys, baselines=baselines)
 
         # Run low-data benchmark
         results_df = run_predictions_downsampled(
@@ -339,6 +341,7 @@ def run_single_task_pseudobulk(args_tuple) -> list[dict]:
         random_state,
         pooling,
         min_donors_per_stratum,
+        baselines
     ) = args_tuple
 
     try:
@@ -364,7 +367,7 @@ def run_single_task_pseudobulk(args_tuple) -> list[dict]:
         n_genes = adata_pb.X.shape[1]
 
         # Build representations on pseudobulk data
-        representations = build_representations(adata_pb, embedding_keys=embedding_keys)
+        representations = build_representations(adata_pb, embedding_keys=embedding_keys, baselines=baselines)
 
         # Run benchmark on pseudobulk
         results_df = run_predictions(
@@ -519,6 +522,12 @@ def main():
     ap.add_argument("--census_uri", default=None, help="Census URI (None for S3)")
     ap.add_argument("--census_version", default="2025-01-30", help="Census version")
     ap.add_argument(
+       "--baselines",
+       nargs="+",
+       default=None,
+       help="Baseline representations to include: raw_lognorm, raw_pca50, random_proj50. Default: all. Pass none to skip all.",
+    )
+    ap.add_argument(
         "--embeddings",
         nargs="+",
         default=["scvi", "geneformer", "tf-sapiens", "tf-exemplar-human", "bmfm"],
@@ -591,6 +600,10 @@ def main():
         "--no_retry_errors", action="store_true", help="Don't retry errored tasks"
     )
     args = ap.parse_args()
+    
+    # Handle --baselines none
+    if args.baselines and len(args.baselines) == 1 and args.baselines[0].lower() == "none":
+    	args.baselines = []
 
     logger = setup_logging(args.log_file)
 
@@ -769,6 +782,7 @@ def main():
                 args.pca_components,
                 args.random_state,
                 min_donors_per_stratum_lookup[task_id],
+                args.baselines,
             )
             for task_id, path in tasks_to_compute.items()
         ]
@@ -786,6 +800,7 @@ def main():
                 args.n_per_class,
                 args.n_bootstrap,
                 min_donors_per_stratum_lookup[task_id],
+                args.baselines,
             )
             for task_id, path in tasks_to_compute.items()
         ]
@@ -802,6 +817,7 @@ def main():
                 args.random_state,
                 args.pooling,
                 min_donors_per_stratum_lookup[task_id],
+                args.baselines,
             )
             for task_id, path in tasks_to_compute.items()
         ]

@@ -178,37 +178,30 @@ def extract_random_proj(
     return X_train, X_test
 
 
-def build_representations(adata, embedding_keys=None):
+def build_representations(adata, embedding_keys=None, baselines=None):
     """
     Build representation dict for run_predictions().
-
     Args:
         adata: AnnData object
         embedding_keys: List of embedding keys in adata.obsm (e.g., ["scvi", "geneformer"])
-
+        baselines: List of baseline names to include: raw_lognorm, raw_pca50, random_proj50.
+                   None = include all baselines. [] = skip all baselines.
     Returns:
         Dictionary of {name: extractor_func}
-
     """
-    reps = {
+    all_baselines = {
         "raw_lognorm": extract_raw,
         "raw_pca50": lambda X, tr, te: extract_pca(X, tr, te, n_components=50),
-        "random_proj50": lambda X, tr, te: extract_random_proj(
-            X, tr, te, n_components=50
-        ),
+        "random_proj50": lambda X, tr, te: extract_random_proj(X, tr, te, n_components=50),
     }
+    reps = all_baselines if baselines is None else {k: v for k, v in all_baselines.items() if k in baselines}
 
     if embedding_keys:
         for key in embedding_keys:
             if key in adata.obsm:
                 emb = adata.obsm[key]
-                # Use closure to capture embedding
-                reps[f"obsm[{key}]"] = lambda X, tr, te, e=emb: extract_embedding(
-                    e, tr, te
-                )
-
+                reps[f"obsm[{key}]"] = lambda X, tr, te, e=emb: extract_embedding(e, tr, te)
     return reps
-
 
 def fold_iterator(X, labels, sample_ids, n_folds, cv_folds=None, random_state: int = 0):
     if cv_folds is not None:
