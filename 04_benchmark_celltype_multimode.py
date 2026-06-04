@@ -46,7 +46,7 @@ def get_cache_filename(dataset_id: str, cell_type: str) -> str:
 
 def benchmark_one_task_standard(args_tuple) -> pd.DataFrame:
     """STANDARD mode: Run cell type prediction with standard CV."""
-    task_row, cache_dir, embedding_keys, n_splits, alpha, random_state = args_tuple
+    task_row, cache_dir, embedding_keys, n_splits, alpha, random_state, baselines = args_tuple
 
     dataset_id = task_row["dataset_id"]
     eligible_cell_types = task_row["cell_type"]
@@ -88,7 +88,7 @@ def benchmark_one_task_standard(args_tuple) -> pd.DataFrame:
         # Run benchmark
         from benchmark import build_representations, run_predictions
 
-        representations = build_representations(adata, embedding_keys=embedding_keys)
+        representations = build_representations(adata, embedding_keys=embedding_keys, baselines=baselines)
 
         results_df = run_predictions(
             adata,
@@ -148,7 +148,7 @@ def benchmark_one_task_lowdata(args_tuple) -> pd.DataFrame:
         alpha,
         random_state,
         n_per_class,
-        n_bootstrap,
+        n_bootstrap, baselines
     ) = args_tuple
 
     dataset_id = task_row["dataset_id"]
@@ -190,7 +190,7 @@ def benchmark_one_task_lowdata(args_tuple) -> pd.DataFrame:
         # Run low-data benchmark
         from benchmark import build_representations, run_predictions_downsampled
 
-        representations = build_representations(adata, embedding_keys=embedding_keys)
+        representations = build_representations(adata, embedding_keys=embedding_keys, baselines=baselines)
 
         results_df = run_predictions_downsampled(
             adata,
@@ -335,7 +335,7 @@ def create_pseudobulk_adata_for_celltype(
 
 def benchmark_one_task_pseudobulk(args_tuple) -> pd.DataFrame:
     """PSEUDOBULK mode: Aggregate by (donor, cell_type) pairs."""
-    task_row, cache_dir, embedding_keys, n_splits, alpha, random_state, pooling = (
+    task_row, cache_dir, embedding_keys, n_splits, alpha, random_state, pooling, baselines = (
         args_tuple
     )
 
@@ -385,7 +385,7 @@ def benchmark_one_task_pseudobulk(args_tuple) -> pd.DataFrame:
         # Run benchmark on pseudobulk
         from benchmark import build_representations, run_predictions
 
-        representations = build_representations(adata_pb, embedding_keys=embedding_keys)
+        representations = build_representations(adata_pb, embedding_keys=embedding_keys, baselines=baselines)
 
         results_df = run_predictions(
             adata_pb,
@@ -548,6 +548,13 @@ def main():
         "--random_state", type=int, default=0, help="Random seed (default: 0)"
     )
     ap.add_argument(
+       "--baselines",
+        nargs="+",
+        default=None,
+        help="Baseline representations to include: raw_lognorm, raw_pca50, random_proj50. Default: all. Pass none to skip all.",
+    )
+
+    ap.add_argument(
         "--embeddings",
         nargs="+",
         default=["scvi", "geneformer", "tf-sapiens", "tf-exemplar-human", "bmfm"],
@@ -600,6 +607,9 @@ def main():
     )
 
     args = ap.parse_args()
+
+    if args.baselines and len(args.baselines) == 1 and args.baselines[0].lower() == "none":
+    	args.baselines = []
 
     logger = setup_logging(
         args.log_file,
@@ -673,6 +683,8 @@ def main():
                 args.folds,
                 args.alpha,
                 args.random_state,
+                args.baselines,
+
             )
             for _, row in tasks_df.iterrows()
         ]
@@ -689,6 +701,8 @@ def main():
                 args.random_state,
                 args.n_per_class,
                 args.n_bootstrap,
+                args.baselines,
+
             )
             for _, row in tasks_df.iterrows()
         ]
@@ -704,6 +718,8 @@ def main():
                 args.alpha,
                 args.random_state,
                 args.pooling,
+                args.baselines,
+
             )
             for _, row in tasks_df.iterrows()
         ]
