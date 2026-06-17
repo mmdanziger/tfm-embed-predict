@@ -75,15 +75,12 @@ def run_one(
 
     work_dir.mkdir(parents=True, exist_ok=True)
 
-    cmd = [
+    cmd = [ 
         "bmfm-targets-run",
         "-cn", "predict",
         f"input_file={input_path}",
         f"working_dir={work_dir}",
         f"checkpoint={checkpoint}",
-        "trainer.pooling_method=first_token",
-        "data_module.max_length=4096",
-        "+output_predictions=false",
     ]
 
     logger.debug(f"[{dataset_id}] Running: {' '.join(cmd)}")
@@ -148,6 +145,12 @@ def main():
 
     if args.task_limit:
         input_files = input_files[: args.task_limit]
+    input_files = [
+        f for f in input_files
+        if not (output_dir / f.stem).exists()
+        or not any((output_dir / f.stem).iterdir())
+    ]
+    logger.info(f"  After filtering completed: {len(input_files)} remaining")
 
     logger.info("=" * 70)
     logger.info("RUN BMFM INFERENCE")
@@ -165,9 +168,6 @@ def main():
                 f"  would run: bmfm-targets-run -cn predict "
                 f"input_file={f} working_dir={work_dir} "
                 f"checkpoint={args.checkpoint} "
-                f"trainer.pooling_method=first_token" 
-                f"data_module.max_length=4096"
-                f"+output_predictions=false"
             )
         print(f"\n[dry_run] {len(input_files)} datasets would be processed.")
         return
