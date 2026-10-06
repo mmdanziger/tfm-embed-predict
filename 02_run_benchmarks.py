@@ -2,13 +2,7 @@
 """
 FAST Benchmark: Two-phase approach for disease prediction with MULTIPLE MODES.
 
-Phase 1: Fetch data from Census ? cache as .h5ad AnnData files
-Phase 2: Run CV experiments in parallel (CPU bound)
-
-Benchmark modes:
-- standard: Standard cross-validation on single-cell data
-- low_data: Downsampling benchmark (low-data regime)
-- pseudobulk: Donor-level classification via cell aggregation
+Phase 1: Fetch data from Census cache as .h5ad AnnData files
 
 Features:
 - Auto-detects cached .h5ad files (no flag needed)
@@ -310,237 +304,6 @@ def fetch_single_task_with_census(
 
 
 # =============================================================================
-# PHASE 2: COMPUTE CV - MODE-SPECIFIC
-# =============================================================================
-
-
-def run_single_task_standard(args_tuple) -> list[dict]:
-    """Run standard CV benchmark on a single cached task. Returns list of result dicts."""
-    (
-        cache_path,
-        embedding_keys,
-        n_splits,
-        alpha,
-        pca_components,
-        random_state,
-        min_donors_per_stratum,
-        baselines
-    ) = args_tuple
-
-    try:
-        from benchmark import build_representations, run_predictions
-
-        # Load cached data (already preprocessed!)
-        adata = sc.read_h5ad(cache_path)
-
-        dataset_id = adata.obs["dataset_id"].iloc[0]
-        cell_type = adata.obs["cell_type"].iloc[0]
-        n_genes = adata.X.shape[1]
-
-        # Manifest guarantees min_donors_per_stratum >= 2; cap folds by it so
-        # StratifiedGroupKFold never sees a stratum with fewer donors than splits.
-        k_folds = min(n_splits, int(min_donors_per_stratum))
-
-        # Build representations (raw, PCA, embeddings)
-        representations = build_representations(adata, embedding_keys=embedding_keys, baselines=baselines)
-
-        # Run benchmark using unified implementation
-        results_df = run_predictions(
-            adata,
-            label_col="disease",
-            representations=representations,
-            n_folds=k_folds,
-            alpha=alpha,
-            random_state=random_state,
-            preprocess=False,  # Data already preprocessed in cache!
-            dataset_id=dataset_id,
-            cell_type=cell_type,
-            n_genes=n_genes,
-        )
-
-        # Convert DataFrame to list of dicts for compatibility
-        results = results_df.to_dict(orient="records")
-
-        # Rename 'representation' column to 'feature' for backward compatibility
-        for r in results:
-            r["feature"] = r.pop("representation")
-
-        if not results:
-            return [
-                {
-                    "dataset_id": dataset_id,
-                    "cell_type": cell_type,
-                    "skip_reason": "all_folds_degenerate",
-                }
-            ]
-
-        return results
-
-    except Exception as e:
-        return [
-            {
-                "cache_path": cache_path,
-                "error": str(e),
-                "error_type": type(e).__name__,
-                "traceback": traceback.format_exc(),
-            }
-        ]
-
-
-def run_single_task_lowdata(args_tuple) -> list[dict]:
-    """Run low-data benchmark with downsampling."""
-    (
-        cache_path,
-        embedding_keys,
-        n_splits,
-        alpha,
-        pca_components,
-        random_state,
-        n_per_class,
-        n_bootstrap,
-        min_donors_per_stratum,
-        baselines
-    ) = args_tuple
-
-    try:
-        from benchmark import build_representations, run_predictions_downsampled
-
-        # Load cached data
-        adata = sc.read_h5ad(cache_path)
-
-        dataset_id = adata.obs["dataset_id"].iloc[0]
-        cell_type = adata.obs["cell_type"].iloc[0]
-        n_genes = adata.X.shape[1]
-
-        k_folds = min(n_splits, int(min_donors_per_stratum))
-
-        # Build representations
-        representations = build_representations(adata, embedding_keys=embedding_keys, baselines=baselines)
-
-        # Run low-data benchmark
-        results_df = run_predictions_downsampled(
-            adata,
-            label_col="disease",
-            representations=representations,
-            n_folds=k_folds,
-            alpha=alpha,
-            random_state=random_state,
-            n_per_class=n_per_class,
-            n_bootstrap=n_bootstrap,
-            dataset_id=dataset_id,
-            cell_type=cell_type,
-            n_genes=n_genes,
-        )
-
-        results = results_df.to_dict(orient="records")
-
-        for r in results:
-            r["feature"] = r.pop("representation")
-
-        if not results:
-            return [
-                {
-                    "dataset_id": dataset_id,
-                    "cell_type": cell_type,
-                    "skip_reason": "all_folds_degenerate",
-                }
-            ]
-
-        return results
-
-    except Exception as e:
-        return [
-            {
-                "cache_path": cache_path,
-                "error": str(e),
-                "error_type": type(e).__name__,
-                "traceback": traceback.format_exc(),
-            }
-        ]
-
-
-def run_single_task_pseudobulk(args_tuple) -> list[dict]:
-    """Run pseudobulk benchmark with donor aggregation."""
-    (
-        cache_path,
-        embedding_keys,
-        n_splits,
-        alpha,
-        pca_components,
-        random_state,
-        pooling,
-        min_donors_per_stratum,
-        baselines
-    ) = args_tuple
-
-    try:
-        from benchmark import build_representations, run_predictions
-        from single_dataset_benchmark import create_pseudobulk_adata
-
-        # Load cached data
-        adata = sc.read_h5ad(cache_path)
-
-        dataset_id = adata.obs["dataset_id"].iloc[0]
-        cell_type = adata.obs["cell_type"].iloc[0]
-
-        # Create pseudobulk data (donor-level aggregation)
-        adata_pb = create_pseudobulk_adata(
-            adata,
-            pooling=pooling,
-            donor_col="donor_id",
-            disease_col="disease",
-        )
-
-        k_folds = min(n_splits, int(min_donors_per_stratum))
-
-        n_genes = adata_pb.X.shape[1]
-
-        # Build representations on pseudobulk data
-        representations = build_representations(adata_pb, embedding_keys=embedding_keys, baselines=baselines)
-
-        # Run benchmark on pseudobulk
-        results_df = run_predictions(
-            adata_pb,
-            label_col="disease",
-            representations=representations,
-            n_folds=k_folds,
-            alpha=alpha,
-            random_state=random_state,
-            preprocess=False,
-            dataset_id=dataset_id,
-            cell_type=cell_type,
-            n_genes=n_genes,
-        )
-
-        results = results_df.to_dict(orient="records")
-
-        for r in results:
-            r["feature"] = r.pop("representation")
-            r["mode"] = "pseudobulk"
-
-        if not results:
-            return [
-                {
-                    "dataset_id": dataset_id,
-                    "cell_type": cell_type,
-                    "skip_reason": "all_folds_degenerate",
-                }
-            ]
-
-        return results
-
-    except Exception as e:
-        return [
-            {
-                "cache_path": cache_path,
-                "error": str(e),
-                "error_type": type(e).__name__,
-                "traceback": traceback.format_exc(),
-            }
-        ]
-
-
-# =============================================================================
 # RESUME LOGIC (compatible with original script)
 # =============================================================================
 
@@ -639,23 +402,10 @@ def main():
     ap.add_argument("--out_parquet", required=True, help="Output results parquet")
     ap.add_argument("--log_file", default="benchmark_fast.log", help="Log file")
     ap.add_argument("--audit_fetch", action="store_true")
-    # Mode selection
-    ap.add_argument(
-        "--mode",
-        choices=["standard", "low_data", "pseudobulk"],
-        default="standard",
-        help="Benchmark mode (default: standard)",
-    )
 
     # Census parameters
     ap.add_argument("--census_uri", default=None, help="Census URI (None for S3)")
     ap.add_argument("--census_version", default="2025-01-30", help="Census version")
-    ap.add_argument(
-       "--baselines",
-       nargs="+",
-       default=None,
-       help="Baseline representations to include: raw_lognorm, raw_pca50, random_proj50. Default: all. Pass none to skip all.",
-    )
     ap.add_argument(
         "--embeddings",
         nargs="+",
@@ -663,42 +413,6 @@ def main():
     )
     ap.add_argument(
         "--cache_dir", default="./_adata_cache", help="Directory for cached .h5ad files"
-    )
-
-    # CV parameters
-    ap.add_argument("--folds", type=int, default=5, help="CV folds")
-    ap.add_argument("--alpha", type=float, default=1e-5, help="L2 regularization")
-    ap.add_argument(
-        "--pca_components",
-        type=int,
-        default=50,
-        help="Number of PCA components (default: 50)",
-    )
-    ap.add_argument(
-        "--random_state", type=int, default=0, help="Random seed (default: 0)"
-    )
-
-    # Low-data mode parameters
-    ap.add_argument(
-        "--n_per_class",
-        type=int,
-        nargs="+",
-        default=[10, 25, 50, 100],
-        help="Sample sizes per class for low-data mode (default: [10, 25, 50, 100])",
-    )
-    ap.add_argument(
-        "--n_bootstrap",
-        type=int,
-        default=10,
-        help="Bootstrap replicates for low-data mode (default: 10)",
-    )
-
-    # Pseudobulk mode parameters
-    ap.add_argument(
-        "--pooling",
-        choices=["mean", "median", "sum"],
-        default="median",
-        help="Pooling strategy for pseudobulk mode (default: median)",
     )
 
     # Parallelization
@@ -710,12 +424,6 @@ def main():
         type=int,
         default=2,
         help="Max concurrent Census fetches (TileDB limit)",
-    )
-    ap.add_argument(
-        "--compute_workers",
-        type=int,
-        default=None,
-        help="Parallel compute workers (default: CPU count)",
     )
 
     # Other options
@@ -730,9 +438,6 @@ def main():
     )
     args = ap.parse_args()
     
-    # Handle --baselines none
-    if args.baselines and len(args.baselines) == 1 and args.baselines[0].lower() == "none":
-    	args.baselines = []
 
     logger = setup_logging(args.log_file)
 
@@ -757,7 +462,7 @@ def main():
     
     
     logger.info(f"{'=' * 70}")
-    logger.info(f"FAST BENCHMARK - Mode: {args.mode.upper()}")
+    logger.info("FAST BENCHMARK")
     logger.info(f"  Total tasks in manifest: {len(tasks_df)}")
     logger.info(f"  Already completed: {len(completed_tasks)}")
     logger.info(f"  Cache dir: {args.cache_dir}")
@@ -765,12 +470,6 @@ def main():
     logger.info(
         f"  Fetch: {args.fetch_workers} threads, semaphore={args.fetch_semaphore}"
     )
-    if args.mode == "low_data":
-        logger.info(
-            f"  Low-data: n_per_class={args.n_per_class}, n_bootstrap={args.n_bootstrap}"
-        )
-    elif args.mode == "pseudobulk":
-        logger.info(f"  Pseudobulk: pooling={args.pooling}")
     logger.info(f"{'=' * 70}")
 
     # Filter to remaining tasks
@@ -881,111 +580,6 @@ def main():
         # Flush skip/error results
         if skip_results:
             flush_results(skip_results, temp_dir, logger)
-
-    # =========================================================================
-    # PHASE 2: COMPUTE (fully parallel)
-    # Skip tasks that are already in temp shards
-    # =========================================================================
-    logger.info("\n[PHASE 2] Running CV benchmarks...")
-
-    compute_workers = args.compute_workers or mp.cpu_count()
-    logger.info(f"  Using {compute_workers} compute workers")
-    logger.info(f"  Tasks with cached data: {len(cached_paths)}")
-
-    # Check which cached tasks are already computed
-    already_computed = get_completed_tasks(
-        temp_dir, retry_errors=not args.no_retry_errors
-    )
-    tasks_to_compute = {
-        task_id: path
-        for task_id, path in cached_paths.items()
-        if task_id not in already_computed
-    }
-
-    logger.info(f"  Already computed: {len(cached_paths) - len(tasks_to_compute)}")
-    logger.info(f"  Need to compute: {len(tasks_to_compute)}")
-
-    if not tasks_to_compute:
-        logger.info("All cached tasks already computed.")
-        merge_shards(temp_dir, args.out_parquet, logger)
-        return
-
-    # Prepare compute args based on mode. Each task carries its own
-    # min_donors_per_stratum (from the manifest) so the worker can cap folds
-    # without re-deriving feasibility.
-    if args.mode == "standard":
-        compute_args = [
-            (
-                path,
-                args.embeddings,
-                args.folds,
-                args.alpha,
-                args.pca_components,
-                args.random_state,
-                min_donors_per_stratum_lookup[task_id],
-                args.baselines,
-            )
-            for task_id, path in tasks_to_compute.items()
-        ]
-        task_func = run_single_task_standard
-
-    elif args.mode == "low_data":
-        compute_args = [
-            (
-                path,
-                args.embeddings,
-                args.folds,
-                args.alpha,
-                args.pca_components,
-                args.random_state,
-                args.n_per_class,
-                args.n_bootstrap,
-                min_donors_per_stratum_lookup[task_id],
-                args.baselines,
-            )
-            for task_id, path in tasks_to_compute.items()
-        ]
-        task_func = run_single_task_lowdata
-
-    elif args.mode == "pseudobulk":
-        compute_args = [
-            (
-                path,
-                args.embeddings,
-                args.folds,
-                args.alpha,
-                args.pca_components,
-                args.random_state,
-                args.pooling,
-                min_donors_per_stratum_lookup[task_id],
-                args.baselines,
-            )
-            for task_id, path in tasks_to_compute.items()
-        ]
-        task_func = run_single_task_pseudobulk
-
-    all_results = []
-    tasks_computed = 0
-
-    with ProcessPoolExecutor(max_workers=compute_workers) as executor:
-        futures = {executor.submit(task_func, arg): arg[0] for arg in compute_args}
-
-        with tqdm(total=len(futures), desc="Computing", unit="task") as pbar:
-            for future in as_completed(futures):
-                task_results = future.result()
-                all_results.extend(task_results)
-                tasks_computed += 1
-
-                # Flush every 20 TASKS (not 500 rows) to avoid losing work
-                if tasks_computed % 20 == 0:
-                    flush_results(all_results, temp_dir, logger)
-                    all_results = []
-
-                pbar.update(1)
-
-    # Final flush
-    if all_results:
-        flush_results(all_results, temp_dir, logger)
 
     # =========================================================================
     # MERGE
