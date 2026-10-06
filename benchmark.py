@@ -339,9 +339,26 @@ def run_predictions(
                 # Adaptive early stopping: only if we have enough samples to
                 # satisfy StratifiedShuffleSplit(validation_fraction=0.1)
                 # for the number of classes present.
+
+
+                #09/09
                 n_classes = len(np.unique(y_train))
-                validation_fraction = 0.1
-                can_early_stop = len(y_train) > (n_classes / validation_fraction)
+                validation_fraction = 0.1                  # actual SGDClassifier validation split size, unchanged
+                early_stop_threshold_fraction = 1 / 32      # <-- controls WHEN early stopping turns on
+
+                if n_per_class is None:
+                    # Standard/full-data mode: unchanged, original formula.
+                    can_early_stop = len(y_train) > (n_classes / validation_fraction)
+                else:
+                    # Low-data mode: reduces to n_per_class > 32 when downsampling
+                    # succeeds (was n_per_class > 10, i.e. n=16 -- caused the
+                    # confirmed synchronized dip). For tasks that hit the cell-
+                    # count ceiling, len(y_train) < n_per_class * n_classes, so
+                    # this correctly stays MORE conservative for those tasks too.
+                    can_early_stop = len(y_train) > (n_classes / early_stop_threshold_fraction)
+
+
+
 
                 # Train classifier
                 clf = SGDClassifier(
