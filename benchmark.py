@@ -5,15 +5,110 @@ Main entry point: run_predictions() - handles CV loop and returns results DataFr
 """
 
 import logging
+import warnings
 
+import numpy as np
 import pandas as pd
 from scipy import sparse
 from sklearn.decomposition import TruncatedSVD
 from sklearn.linear_model import SGDClassifier
 from sklearn.model_selection import StratifiedGroupKFold
 from sklearn.preprocessing import MaxAbsScaler, StandardScaler
+from sklearn.random_projection import SparseRandomProjection
 
 from metrics import compute_donor_metrics, compute_metrics
+
+# =============================================================================
+# Logging Setup
+# =============================================================================
+
+
+def setup_logging(
+    log_file: str,
+    logger_name: str = "benchmark",
+    include_console: bool = True,
+    console_level: int = logging.INFO,
+    include_thread_name: bool = False,
+    filter_warnings: bool = False,
+) -> logging.Logger:
+    """
+    Configure logging for benchmark runs.
+
+    Parameters
+    ----------
+    log_file : str
+        Path to log file
+    logger_name : str, default="benchmark"
+        Name of the logger to configure
+    include_console : bool, default=True
+        Whether to add console handler
+    console_level : int, default=logging.INFO
+        Logging level for console handler
+    include_thread_name : bool, default=False
+        Whether to include thread name in file log format
+    filter_warnings : bool, default=False
+        Whether to filter RuntimeWarning and UserWarning
+
+    Returns
+    -------
+    logging.Logger
+        Configured logger instance
+
+    """
+    logging.captureWarnings(True)
+    logger = logging.getLogger(logger_name)
+    logger.setLevel(logging.INFO)
+    logger.handlers = []
+    logger.propagate = False
+
+    # File handler
+    fh = logging.FileHandler(log_file, mode="a", encoding="utf-8")
+    if include_thread_name:
+        fh.setFormatter(
+            logging.Formatter(
+                "%(asctime)s | %(levelname)-7s | %(threadName)-15s | %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+        )
+    else:
+        fh.setFormatter(
+            logging.Formatter(
+                "%(asctime)s | %(levelname)-7s | %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+        )
+    logger.addHandler(fh)
+
+    # Console handler
+    if include_console:
+        ch = logging.StreamHandler()
+        ch.setLevel(console_level)
+        if console_level == logging.INFO:
+            ch.setFormatter(
+                logging.Formatter("%(asctime)s | %(message)s", datefmt="%H:%M:%S")
+            )
+        else:
+            ch.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+        logger.addHandler(ch)
+
+    # Warning filters
+    if filter_warnings:
+        warnings.filterwarnings("ignore", category=RuntimeWarning)
+        warnings.filterwarnings("ignore", category=UserWarning)
+    else:
+        warnings.filterwarnings("ignore")
+
+    # Special handling for py.warnings logger (used in 04_run_celltype_benchmark.py)
+    if include_thread_name:
+        warnings_logger = logging.getLogger("py.warnings")
+        warnings_logger.setLevel(logging.WARNING)
+        warnings_logger.handlers = []
+        warnings_logger.propagate = False
+        warnings_logger.addHandler(fh)
+
+    return logger
+
+
 from preprocessing import preprocess_counts
 
 # =============================================================================
@@ -64,33 +159,64 @@ def extract_embedding(embedding_matrix, train_idx, test_idx):
     return X_train, X_test
 
 
-def build_representations(adata, embedding_keys=None):
+# Sanity-check baseline: random projection should perform poorly.
+# If it matches raw_lognorm/PCA, something is wrong with the setup.
+def extract_random_proj(
+    X_lognorm, train_idx, test_idx, n_components=50, random_state=0
+):
+    rp = SparseRandomProjection(
+        n_components=n_components,
+        dense_output=True,
+        random_state=random_state,
+    )
+    rp.fit(X_lognorm[train_idx[:1]].astype(np.float64))
+    X_train = rp.transform(X_lognorm[train_idx].astype(np.float64))
+    X_test = rp.transform(X_lognorm[test_idx].astype(np.float64))
+    scaler = StandardScaler()
+    X_train = scaler.fit_transform(X_train)
+    X_test = scaler.transform(X_test)
+    return X_train, X_test
+
+
+def build_representations(adata, embedding_keys=None, baselines=None):
     """
     Build representation dict for run_predictions().
-
     Args:
         adata: AnnData object
         embedding_keys: List of embedding keys in adata.obsm (e.g., ["scvi", "geneformer"])
-
+        baselines: List of baseline names to include: raw_lognorm, raw_pca50, random_proj50.
+                   None = include all baselines. [] = skip all baselines.
     Returns:
         Dictionary of {name: extractor_func}
-
     """
-    reps = {
+    all_baselines = {
         "raw_lognorm": extract_raw,
         "raw_pca50": lambda X, tr, te: extract_pca(X, tr, te, n_components=50),
+        "random_proj50": lambda X, tr, te: extract_random_proj(X, tr, te, n_components=50),
     }
+    reps = all_baselines if baselines is None else {k: v for k, v in all_baselines.items() if k in baselines}
 
     if embedding_keys:
         for key in embedding_keys:
             if key in adata.obsm:
                 emb = adata.obsm[key]
-                # Use closure to capture embedding
-                reps[f"obsm[{key}]"] = lambda X, tr, te, e=emb: extract_embedding(
-                    e, tr, te
-                )
-
+                reps[f"obsm[{key}]"] = lambda X, tr, te, e=emb: extract_embedding(e, tr, te)
     return reps
+
+def fold_iterator(X, labels, sample_ids, n_folds, cv_folds=None, random_state: int = 0):
+    if cv_folds is not None:
+        for fold_id, test_samples in enumerate(cv_folds):
+            test_mask = np.isin(sample_ids, test_samples)
+            train_mask = ~test_mask
+            yield fold_id, np.where(train_mask)[0], np.where(test_mask)[0]
+    else:
+        sgkf = StratifiedGroupKFold(
+            n_splits=n_folds, shuffle=True, random_state=random_state
+        )
+        for fold_id, (train_idx, test_idx) in enumerate(
+            sgkf.split(X, labels, groups=sample_ids)
+        ):
+            yield fold_id, train_idx, test_idx
 
 
 # =============================================================================
@@ -108,6 +234,7 @@ def run_predictions(
     stratify_col: str = None,
     random_state: int = 0,
     preprocess: bool = True,
+    cv_folds: list[list[str]] | None = None,
     **metadata,
 ) -> pd.DataFrame:
     """
@@ -150,34 +277,88 @@ def run_predictions(
         # Data already preprocessed (e.g., from cache)
         X_lognorm = adata.X if sparse.issparse(adata.X) else sparse.csr_matrix(adata.X)
 
-    labels = adata.obs[label_col].values
+    # labels = adata.obs[label_col].values
+    # labels = adata.obs["disease"].astype(str).values
+    labels = np.array(adata.obs[label_col], dtype=str)
     donor_ids = adata.obs[donor_col].values
-    stratify_labels = adata.obs[stratify_col].values if stratify_col else labels
-
-    # CV splits (StratifiedGroupKFold by donors)
-    sgkf = StratifiedGroupKFold(
-        n_splits=n_folds, shuffle=True, random_state=random_state
+    # stratify_labels = adata.obs[stratify_col].values if stratify_col else labels
+    stratify_labels = (
+        np.array(adata.obs[stratify_col], dtype=str) if stratify_col else labels
     )
 
-    results = []
+    # ---- encode ----
+    # from sklearn.preprocessing import LabelEncoder
+    # label_encoder = LabelEncoder()
+    # y_ = label_encoder.fit_transform(labels)
 
-    for fold_id, (train_idx, test_idx) in enumerate(
-        sgkf.split(X_lognorm, stratify_labels, groups=donor_ids)
+    # logger.info(
+    #    f"Label mapping: {dict(enumerate(label_encoder.classes_))}"
+    # )
+
+    results = []
+    n_per_class = metadata.pop("n_per_class", None)
+    random_seed_base = metadata.get("bootstrap", 0) + random_state
+
+    assert stratify_labels.dtype == object or np.issubdtype(
+        stratify_labels.dtype, np.str_
+    ), (
+        f"stratify_labels dtype={stratify_labels.dtype}, values={np.unique(stratify_labels)}"
+    )
+    for fold_id, train_idx, test_idx in fold_iterator(
+        X_lognorm, stratify_labels, donor_ids, n_folds, cv_folds, random_state
     ):
         y_train = labels[train_idx]
         y_test = labels[test_idx]
         donors_test = donor_ids[test_idx]
+        # import pdb; pdb.set_trace()
+        ### downsample X
+
+        if n_per_class is not None:
+            train_idx, all_classes_met = downsample_to_n_per_class(
+                train_idx=train_idx,
+                y_train=y_train,
+                n_per_class=n_per_class,
+                random_state=random_seed_base
+                + fold_id,  # unique per fold AND bootstrap,
+                logger=logger,
+            )
+            y_train = labels[train_idx]
+        ###
 
         fold_name = f"fold_{fold_id + 1}"
         logger.info(
             f"  {fold_name}: {len(train_idx)} train, {len(test_idx)} test cells"
         )
-
+        # if fold_id==2: import pdb; pdb.set_trace()
         # For each representation
         for rep_name, extractor in representations.items():
             try:
                 # Extract features
                 X_train, X_test = extractor(X_lognorm, train_idx, test_idx)
+
+                # Adaptive early stopping: only if we have enough samples to
+                # satisfy StratifiedShuffleSplit(validation_fraction=0.1)
+                # for the number of classes present.
+
+
+                #09/09
+                n_classes = len(np.unique(y_train))
+                validation_fraction = 0.1                  # actual SGDClassifier validation split size, unchanged
+                early_stop_threshold_fraction = 1 / 32      # <-- controls WHEN early stopping turns on
+
+                if n_per_class is None:
+                    # Standard/full-data mode: unchanged, original formula.
+                    can_early_stop = len(y_train) > (n_classes / validation_fraction)
+                else:
+                    # Low-data mode: reduces to n_per_class > 32 when downsampling
+                    # succeeds (was n_per_class > 10, i.e. n=16 -- caused the
+                    # confirmed synchronized dip). For tasks that hit the cell-
+                    # count ceiling, len(y_train) < n_per_class * n_classes, so
+                    # this correctly stays MORE conservative for those tasks too.
+                    can_early_stop = len(y_train) > (n_classes / early_stop_threshold_fraction)
+
+
+
 
                 # Train classifier
                 clf = SGDClassifier(
@@ -186,18 +367,35 @@ def run_predictions(
                     class_weight="balanced",
                     max_iter=2000,
                     random_state=random_state,
-                    early_stopping=len(y_train) >= 10,  # Adaptive
+                    early_stopping=can_early_stop,
+                    validation_fraction=validation_fraction,
                 )
                 clf.fit(X_train, y_train)
 
                 # Predict
                 y_pred = clf.predict(X_test)
-                y_proba = clf.predict_proba(X_test)
 
-                # Compute metrics
+                # Try to get probabilities (can fail with numerical issues in multiclass)
+                try:
+                    y_proba = clf.predict_proba(X_test)
+                    # Check for NaN in probabilities
+                    if np.isnan(y_proba).any():
+                        logger.warning(
+                            f"  {rep_name} in {fold_name}: predict_proba produced NaN, "
+                            "falling back to predict-only metrics"
+                        )
+                        y_proba = None
+                except (ValueError, RuntimeWarning) as e:
+                    logger.warning(
+                        f"  {rep_name} in {fold_name}: predict_proba failed ({e}), "
+                        "using predict-only metrics"
+                    )
+                    y_proba = None
+
+                # Compute metrics (handle case where probabilities unavailable)
                 cell_metrics = compute_metrics(y_test, y_proba, y_pred, clf.classes_)
                 donor_metrics = compute_donor_metrics(
-                    y_test, y_proba, donors_test, clf.classes_
+                    y_test, y_pred, donors_test, clf.classes_
                 )
 
                 results.append(
@@ -206,6 +404,7 @@ def run_predictions(
                         "representation": rep_name,
                         "n_train": len(train_idx),
                         "n_test": len(test_idx),
+                        "n_per_class": n_per_class,
                         **metadata,
                         **cell_metrics,
                         **donor_metrics,
@@ -229,6 +428,34 @@ def run_predictions(
 # =============================================================================
 # Optional: Downsampling Wrapper
 # =============================================================================
+def downsample_to_n_per_class(
+    train_idx: np.ndarray,
+    y_train: np.ndarray,
+    n_per_class: int,
+    random_state: int,
+    logger: logging.Logger,
+) -> tuple[np.ndarray, bool]:
+    """Downsample training data to N samples per class."""
+    rng = np.random.RandomState(random_state)
+    selected_idx = []
+    all_classes_met = True
+
+    for class_label in np.unique(y_train):
+        class_mask = y_train == class_label
+        class_indices = train_idx[class_mask]
+        n_available = len(class_indices)
+
+        if n_available < n_per_class:
+            logger.warning(
+                f"    Class {class_label}: only {n_available}/{n_per_class} available"
+            )
+            selected_idx.extend(class_indices)
+            all_classes_met = False
+        else:
+            selected = rng.choice(class_indices, size=n_per_class, replace=False)
+            selected_idx.extend(selected)
+
+    return np.array(selected_idx), all_classes_met
 
 
 def run_predictions_downsampled(
@@ -237,6 +464,7 @@ def run_predictions_downsampled(
     representations: dict,
     n_per_class_list: list,
     n_bootstrap: int = 10,
+    cv_folds: list[list[str]] | None = None,
     **kwargs,
 ) -> pd.DataFrame:
     """
@@ -266,8 +494,8 @@ def run_predictions_downsampled(
                 representations,
                 n_per_class=n_per_class,
                 bootstrap=bootstrap,
+                cv_folds=cv_folds,
                 **kwargs,
             )
             all_results.append(results)
-
     return pd.concat(all_results, ignore_index=True)

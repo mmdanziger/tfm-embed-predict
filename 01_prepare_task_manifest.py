@@ -6,7 +6,7 @@ A task is defined as (dataset_id, cell_type) → predict disease label.
 
 Inclusion criteria:
 - At least 2 distinct disease labels
-- At least min_donors_per_disease donors per disease (default 3)
+- At least min_donors_per_stratum donors per disease stratum (default 3)
 - At least min_cells total cells in the (dataset_id, cell_type) group (default 500)
 - At least min_cells_per_disease cells per disease label (default 50)
 
@@ -27,7 +27,7 @@ def make_task_manifest(
     census_version: str,
     out_path: str,
     organism: str = "homo_sapiens",
-    min_donors_per_disease: int = 3,
+    min_donors_per_stratum: int = 3,
     min_cells: int = 500,
     min_cells_per_disease: int = 50,
 ) -> None:
@@ -39,14 +39,14 @@ def make_task_manifest(
         census_version: Census version string
         out_path: Path to save the output parquet manifest
         organism: Organism to query
-        min_donors_per_disease: Minimum donors required per disease (default 3)
+        min_donors_per_stratum: Minimum donors required per disease stratum (default 3)
         min_cells: Minimum total cells in (dataset_id, cell_type) group (default 500)
         min_cells_per_disease: Minimum cells per disease label (default 50)
 
     """
     print(f"Opening Census {census_version}...")
     print(
-        f"Filters: min_donors_per_disease={min_donors_per_disease}, "
+        f"Filters: min_donors_per_stratum={min_donors_per_stratum}, "
         f"min_cells={min_cells}, min_cells_per_disease={min_cells_per_disease}"
     )
 
@@ -137,15 +137,15 @@ def make_task_manifest(
     min_donors_per_group = (
         donors_per_disease.groupby(group_cols, observed=True)["n_donors"]
         .min()
-        .rename("min_donors_per_disease")
+        .rename("min_donors_per_stratum")
         .reset_index()
     )
 
     eligible_groups = min_donors_per_group[
-        min_donors_per_group["min_donors_per_disease"] >= min_donors_per_disease
+        min_donors_per_group["min_donors_per_stratum"] >= min_donors_per_stratum
     ]
     print(
-        f"  Groups with >= {min_donors_per_disease} donors per disease: {len(eligible_groups):,}"
+        f"  Groups with >= {min_donors_per_stratum} donors per disease stratum: {len(eligible_groups):,}"
     )
 
     # ==========================================================================
@@ -193,7 +193,7 @@ def make_task_manifest(
 
     # Sort by task "quality" - more diseases, more donors, more cells
     task_manifest = task_manifest.sort_values(
-        ["n_diseases", "min_donors_per_disease", "n_cells"],
+        ["n_diseases", "min_donors_per_stratum", "n_cells"],
         ascending=[False, False, False],
     ).reset_index(drop=True)
 
@@ -254,10 +254,10 @@ def main():
     ap.add_argument("--out_path", required=True, help="Output manifest parquet path")
     ap.add_argument("--organism", default="homo_sapiens", help="Organism")
     ap.add_argument(
-        "--min_donors_per_disease",
+        "--min_donors_per_stratum",
         type=int,
         default=3,
-        help="Minimum donors per disease for CV (default 3)",
+        help="Minimum donors per disease stratum for CV (default 3)",
     )
     ap.add_argument(
         "--min_cells",
@@ -278,7 +278,7 @@ def main():
         args.census_version,
         args.out_path,
         args.organism,
-        args.min_donors_per_disease,
+        args.min_donors_per_stratum,
         args.min_cells,
         args.min_cells_per_disease,
     )

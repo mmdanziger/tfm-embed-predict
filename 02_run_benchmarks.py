@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-FAST Benchmark: Two-phase approach for disease prediction.
+FAST Benchmark: Two-phase approach for disease prediction with MULTIPLE MODES.
 
-Phase 1: Fetch data from Census → cache as .h5ad AnnData files
-Phase 2: Run CV experiments in parallel (CPU bound)
+Phase 1: Fetch data from Census cache as .h5ad AnnData files
 
 Features:
 - Auto-detects cached .h5ad files (no flag needed)
@@ -22,7 +21,6 @@ import shutil
 import threading
 import traceback
 import uuid
-import warnings
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -39,32 +37,8 @@ from tqdm.auto import tqdm
 FETCH_SEMAPHORE = None
 
 
+from benchmark import setup_logging
 from preprocessing import sparse_normalize_log1p
-
-
-def setup_logging(log_file: str) -> logging.Logger:
-    """Configure logging."""
-    logging.captureWarnings(True)
-    logger = logging.getLogger("benchmark")
-    logger.setLevel(logging.INFO)
-    logger.handlers = []
-    logger.propagate = False
-
-    fh = logging.FileHandler(log_file, mode="a", encoding="utf-8")
-    fh.setFormatter(
-        logging.Formatter(
-            "%(asctime)s | %(levelname)-7s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
-        )
-    )
-    logger.addHandler(fh)
-
-    ch = logging.StreamHandler()
-    ch.setLevel(logging.INFO)
-    ch.setFormatter(logging.Formatter("%(asctime)s | %(message)s", datefmt="%H:%M:%S"))
-    logger.addHandler(ch)
-
-    warnings.filterwarnings("ignore")
-    return logger
 
 
 def get_task_id(dataset_id: str, cell_type: str) -> str:
@@ -95,7 +69,7 @@ def validate_task_feasibility(
     stats = {
         "n_classes": n_classes,
         "n_donors": n_donors,
-        "min_donors_per_class": min_donors,
+        "min_donors_per_stratum": min_donors,
     }
 
     if n_classes < 2:
@@ -108,7 +82,136 @@ def validate_task_feasibility(
 
     return True, "ok", stats
 
+def audit_fetch_tasks(
+    tasks_df,
+    census_uri,
+    census_version,
+    embeddings,
+    fetch_semaphore=2,
+    logger=None,
+):
 
+
+    if logger is None:
+        import logging
+        logger = logging.getLogger(__name__)
+
+    FETCH_SEMAPHORE = threading.Semaphore(fetch_semaphore)
+
+    rows = []
+
+    logger.info(f"[VALIDATOR] Running on {len(tasks_df)} tasks")
+
+    with cellxgene_census.open_soma(
+        uri=census_uri,
+        census_version=census_version,
+    ) as census:
+
+        for _, row in tqdm(tasks_df.iterrows(), total=len(tasks_df), desc="VALIDATING"):
+
+            dataset_id = row["dataset_id"]
+            cell_type = row["cell_type"]
+            task_id = f"{dataset_id}::{cell_type}"
+
+            try:
+                obs_filter = (
+                    f"is_primary_data==True "
+                    f"and dataset_id=='{dataset_id}' "
+                    f"and cell_type=='{cell_type}'"
+                )
+
+                with FETCH_SEMAPHORE:
+                    adata = cellxgene_census.get_anndata(
+                        census=census,
+                        organism="homo_sapiens",
+                        measurement_name="RNA",
+                        obs_value_filter=obs_filter,
+                        obs_column_names=[
+                            "dataset_id",
+                            "cell_type",
+                            "donor_id",
+                            "disease",
+                        ],
+                        obs_embeddings=embeddings,
+                    )
+
+                # -------------------------
+                # EMPTY DATASET
+                # -------------------------
+                if adata.n_obs == 0:
+                    rows.append({
+                        "task_id": task_id,
+                        "status": "skip",
+                        "reason": "no_cells",
+                        "n_cells": 0,
+                        "n_classes": 0,
+                        "n_donors": 0,
+                        "min_donors_per_class": 0,
+                    })
+                    continue
+
+                y = adata.obs["disease"].astype(str).values
+                donors = adata.obs["donor_id"].astype(str).values
+
+                n_cells = adata.n_obs
+                n_classes = len(set(y))
+                n_donors = len(set(donors))
+
+                donor_class = {}
+                for d, label in zip(donors, y):
+                    donor_class[d] = label
+
+                class_counts = Counter(donor_class.values())
+                min_donors = min(class_counts.values()) if class_counts else 0
+
+                # -------------------------
+                # FEASIBILITY CHECK
+                # -------------------------
+                if n_classes < 2:
+                    status, reason = "skip", "too_few_classes"
+                elif min_donors < 2:
+                    rare = [c for c, cnt in class_counts.items() if cnt < 2]
+                    status, reason = "skip", f"classes_with_lt2_donors:{rare}"
+                elif n_donors < 2:
+                    status, reason = "skip", "too_few_donors"
+                else:
+                    status, reason = "ok", None
+
+                rows.append({
+                    "task_id": task_id,
+                    "status": status,
+                    "reason": reason,
+                    "n_cells": n_cells,
+                    "n_classes": n_classes,
+                    "n_donors": n_donors,
+                    "min_donors_per_class": min_donors,
+                })
+
+                del adata
+                gc.collect()
+
+            except Exception as e:
+                rows.append({
+                    "task_id": task_id,
+                    "status": "error",
+                    "reason": f"{type(e).__name__}: {str(e)}",
+                    "n_cells": None,
+                    "n_classes": None,
+                    "n_donors": None,
+                    "min_donors_per_class": None,
+                })
+
+    df = pd.DataFrame(rows)
+
+    logger.info("\n[VALIDATION SUMMARY]")
+    logger.info(df["status"].value_counts().to_string())
+
+    if "reason" in df.columns:
+        logger.info("\n[TOP REASONS]")
+        logger.info(df["reason"].value_counts().head(20).to_string())
+
+    return df
+    
 # =============================================================================
 # PHASE 1: FETCH DATA
 # =============================================================================
@@ -164,13 +267,17 @@ def fetch_single_task_with_census(
         X = X[:, gene_mask]
         X_lognorm = sparse_normalize_log1p(X)
 
-        # Store processed data
+        # Store processed data. Preserving adata.var is CRITICAL: without it,
+        # var_names default to positional integer strings and sc.concat(join=...)
+        # across caches silently mixes different genes into the same column.
         adata_processed = AnnData(
             X=X_lognorm,
             obs=adata.obs[["dataset_id", "cell_type", "donor_id", "disease"]].copy(),
+            var=adata.var.iloc[gene_mask].copy(),
             obsm={k: adata.obsm[k] for k in embedding_keys if k in adata.obsm},
         )
         adata_processed.uns["n_genes_original"] = int(gene_mask.sum())
+        adata_processed.uns["cache_format_version"] = 2
 
         # Save
         adata_processed.write_h5ad(cache_path)
@@ -194,90 +301,6 @@ def fetch_single_task_with_census(
             "error": str(e),
             "traceback": traceback.format_exc(),
         }
-
-
-# =============================================================================
-# PHASE 2: COMPUTE CV
-# =============================================================================
-
-
-def run_single_task(args_tuple) -> list[dict]:
-    """Run CV benchmark on a single cached task. Returns list of result dicts."""
-    cache_path, embedding_keys, n_splits, alpha, pca_components, random_state = (
-        args_tuple
-    )
-
-    try:
-        import time
-
-        from benchmark import build_representations, run_predictions
-
-        # Load cached data (already preprocessed!)
-        adata = sc.read_h5ad(cache_path)
-
-        dataset_id = adata.obs["dataset_id"].iloc[0]
-        cell_type = adata.obs["cell_type"].iloc[0]
-        n_genes = adata.X.shape[1]
-
-        # Check if we have enough donors for CV
-        donors = adata.obs["donor_id"].astype(str).values
-        n_donors = len(np.unique(donors))
-        k_folds = min(n_splits, n_donors)
-
-        if k_folds < 2:
-            return [
-                {
-                    "dataset_id": dataset_id,
-                    "cell_type": cell_type,
-                    "skip_reason": "too_few_donors_for_cv",
-                }
-            ]
-
-        # Build representations (raw, PCA, embeddings)
-        representations = build_representations(adata, embedding_keys=embedding_keys)
-
-        # Run benchmark using unified implementation
-        t0 = time.perf_counter()
-        results_df = run_predictions(
-            adata,
-            label_col="disease",
-            representations=representations,
-            n_folds=k_folds,
-            alpha=alpha,
-            random_state=random_state,
-            preprocess=False,  # Data already preprocessed in cache!
-            dataset_id=dataset_id,
-            cell_type=cell_type,
-            n_genes=n_genes,
-        )
-
-        # Convert DataFrame to list of dicts for compatibility
-        results = results_df.to_dict(orient="records")
-
-        # Rename 'representation' column to 'feature' for backward compatibility
-        for r in results:
-            r["feature"] = r.pop("representation")
-
-        if not results:
-            return [
-                {
-                    "dataset_id": dataset_id,
-                    "cell_type": cell_type,
-                    "skip_reason": "all_folds_degenerate",
-                }
-            ]
-
-        return results
-
-    except Exception as e:
-        return [
-            {
-                "cache_path": cache_path,
-                "error": str(e),
-                "error_type": type(e).__name__,
-                "traceback": traceback.format_exc(),
-            }
-        ]
 
 
 # =============================================================================
@@ -373,23 +396,26 @@ def merge_shards(temp_dir: str, out_path: str, logger: logging.Logger) -> pd.Dat
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Fast two-phase disease prediction benchmark"
+        description="Fast two-phase disease prediction benchmark with multiple modes"
     )
     ap.add_argument("--tasks_manifest", required=True, help="Task manifest parquet")
     ap.add_argument("--out_parquet", required=True, help="Output results parquet")
     ap.add_argument("--log_file", default="benchmark_fast.log", help="Log file")
+    ap.add_argument("--audit_fetch", action="store_true")
+
+    # Census parameters
     ap.add_argument("--census_uri", default=None, help="Census URI (None for S3)")
     ap.add_argument("--census_version", default="2025-01-30", help="Census version")
     ap.add_argument(
         "--embeddings",
         nargs="+",
-        default=["scvi", "geneformer", "tf-sapiens", "tf-exemplar-human"],
+        default=["scvi", "geneformer", "tf-sapiens", "tf-exemplar-human", "bmfm"],
     )
     ap.add_argument(
         "--cache_dir", default="./_adata_cache", help="Directory for cached .h5ad files"
     )
-    ap.add_argument("--folds", type=int, default=5, help="CV folds")
-    ap.add_argument("--alpha", type=float, default=1e-5, help="L2 regularization")
+
+    # Parallelization
     ap.add_argument(
         "--fetch_workers", type=int, default=4, help="Parallel fetch threads"
     )
@@ -399,12 +425,8 @@ def main():
         default=2,
         help="Max concurrent Census fetches (TileDB limit)",
     )
-    ap.add_argument(
-        "--compute_workers",
-        type=int,
-        default=None,
-        help="Parallel compute workers (default: CPU count)",
-    )
+
+    # Other options
     ap.add_argument(
         "--task_limit", type=int, default=None, help="Limit tasks (for testing)"
     )
@@ -415,6 +437,7 @@ def main():
         "--no_retry_errors", action="store_true", help="Don't retry errored tasks"
     )
     args = ap.parse_args()
+    
 
     logger = setup_logging(args.log_file)
 
@@ -436,7 +459,8 @@ def main():
     completed_tasks = get_completed_tasks(
         temp_dir, retry_errors=not args.no_retry_errors
     )
-
+    
+    
     logger.info(f"{'=' * 70}")
     logger.info("FAST BENCHMARK")
     logger.info(f"  Total tasks in manifest: {len(tasks_df)}")
@@ -452,6 +476,11 @@ def main():
     tasks_df["task_id"] = tasks_df["dataset_id"] + "::" + tasks_df["cell_type"]
     remaining_df = tasks_df[~tasks_df["task_id"].isin(completed_tasks)].copy()
     logger.info(f"Tasks to process: {len(remaining_df)}")
+
+    # Manifest is the source of truth for per-task fold feasibility.
+    min_donors_per_stratum_lookup = dict(
+        zip(tasks_df["task_id"], tasks_df["min_donors_per_stratum"])
+    )
 
     if len(remaining_df) == 0:
         logger.info("All tasks complete. Merging shards...")
@@ -480,6 +509,17 @@ def main():
     logger.info(f"  Already cached: {len(cached_paths)}")
     logger.info(f"  Need to fetch: {len(tasks_to_fetch)}")
 
+    if args.audit_fetch:
+        audit_fetch_tasks(
+            tasks_df=tasks_to_fetch,
+            census_uri=args.census_uri,
+            census_version=args.census_version,
+            embeddings=args.embeddings,
+            fetch_semaphore=args.fetch_semaphore,
+            logger=logger,
+        )
+        import sys
+        sys.exit(0)
     # Fetch missing tasks with SHARED Census connection
     if tasks_to_fetch:
         skip_results = []
@@ -542,64 +582,6 @@ def main():
             flush_results(skip_results, temp_dir, logger)
 
     # =========================================================================
-    # PHASE 2: COMPUTE (fully parallel)
-    # Skip tasks that are already in temp shards
-    # =========================================================================
-    logger.info("\n[PHASE 2] Running CV benchmarks...")
-
-    compute_workers = args.compute_workers or mp.cpu_count()
-    logger.info(f"  Using {compute_workers} compute workers")
-    logger.info(f"  Tasks with cached data: {len(cached_paths)}")
-
-    # Check which cached tasks are already computed
-    already_computed = get_completed_tasks(
-        temp_dir, retry_errors=not args.no_retry_errors
-    )
-    tasks_to_compute = {
-        task_id: path
-        for task_id, path in cached_paths.items()
-        if task_id not in already_computed
-    }
-
-    logger.info(f"  Already computed: {len(cached_paths) - len(tasks_to_compute)}")
-    logger.info(f"  Need to compute: {len(tasks_to_compute)}")
-
-    if not tasks_to_compute:
-        logger.info("All cached tasks already computed.")
-        merge_shards(temp_dir, args.out_parquet, logger)
-        return
-
-    compute_args = [
-        (path, args.embeddings, args.folds, args.alpha, 50, 0)
-        for path in tasks_to_compute.values()
-    ]
-
-    all_results = []
-    tasks_computed = 0
-
-    with ProcessPoolExecutor(max_workers=compute_workers) as executor:
-        futures = {
-            executor.submit(run_single_task, arg): arg[0] for arg in compute_args
-        }
-
-        with tqdm(total=len(futures), desc="Computing", unit="task") as pbar:
-            for future in as_completed(futures):
-                task_results = future.result()
-                all_results.extend(task_results)
-                tasks_computed += 1
-
-                # Flush every 20 TASKS (not 500 rows) to avoid losing work
-                if tasks_computed % 20 == 0:
-                    flush_results(all_results, temp_dir, logger)
-                    all_results = []
-
-                pbar.update(1)
-
-    # Final flush
-    if all_results:
-        flush_results(all_results, temp_dir, logger)
-
-    # =========================================================================
     # MERGE
     # =========================================================================
     final_df = merge_shards(temp_dir, args.out_parquet, logger)
@@ -616,7 +598,7 @@ def main():
         )
         for feat, row in summary.iterrows():
             logger.info(
-                f"  {feat:25s}: MCC = {row['mean']:.3f} ± {row['std']:.3f} (n={int(row['count'])})"
+                f"  {feat:25s}: MCC = {row['mean']:.3f} +/- {row['std']:.3f} (n={int(row['count'])})"
             )
 
     # Cleanup

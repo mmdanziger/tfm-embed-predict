@@ -4,6 +4,13 @@ import pandas as pd
 import seaborn as sns
 from scipy import stats
 
+# Optional: comment out if you keep feature_colors.py in a different location
+try:
+    from feature_colors import get_palette, get_color, FEATURE_COLOR_MAP
+    _HAS_COLOR_MAP = True
+except ImportError:
+    _HAS_COLOR_MAP = False
+
 
 def load_and_prepare_results(parquet_path: str | list[str]) -> pd.DataFrame:
     """
@@ -30,12 +37,22 @@ def load_and_prepare_results(parquet_path: str | list[str]) -> pd.DataFrame:
         "raw_lognorm": "Raw Log-norm",
         "raw_pca50": "PCA-50",
     }
+
+    
     # Handle embeddings dynamically
     for col in df["feature"].unique():
         if col.startswith("obsm["):
             emb_name = col.split("[")[1].split("]")[0]
             feature_map[col] = emb_name.upper()
-
+    overrides = {
+        "BMFM": "BMFM_LW",
+        "BMFM_MLMMUL": "BMFM_LM",
+        "BMFM_WCED10": "BMFM_BW",
+        "BMFM_VAR1": "BMFM-CONCAT",
+    }
+    for k, v in feature_map.items():
+        if v in overrides:
+            feature_map[k] = overrides[v]
     df["feature_clean"] = df["feature"].map(feature_map).fillna(df["feature"])
 
     # Create task identifier
@@ -50,13 +67,22 @@ def load_and_prepare_results(parquet_path: str | list[str]) -> pd.DataFrame:
     return df
 
 
-def plot_overall_performance(df: pd.DataFrame, metrics: list[str] = None) -> plt.Figure:
+def plot_overall_performance(
+    df: pd.DataFrame,
+    metrics: list[str] = None,
+    feature_order: list[str] = None,
+    color_map: dict[str, str] | None = None,   # ← NEW: pass FEATURE_COLOR_MAP or None
+) -> plt.Figure:
     """
     Creates boxplots showing overall distribution of performance across all tasks.
 
     Args:
         df: Results DataFrame from load_and_prepare_results()
         metrics: List of metric columns to plot (default: MCC, balanced_acc, F1_macro)
+        feature_order: Explicit ordering of features on x-axis
+        color_map: Optional dict mapping feature_clean → hex color.
+                   If None and feature_colors.py is importable, uses FEATURE_COLOR_MAP
+                   automatically.  Pass {} to force the default seaborn palette.
 
     Returns:
         Matplotlib figure
@@ -65,13 +91,25 @@ def plot_overall_performance(df: pd.DataFrame, metrics: list[str] = None) -> plt
     if metrics is None:
         metrics = ["MCC", "balanced_acc", "F1_macro"]
 
-    # Order features by median MCC
-    feature_order = (
-        df.groupby("feature_clean")["MCC"]
-        .median()
-        .sort_values(ascending=False)
-        .index.tolist()
-    )
+    if feature_order is None:
+        feature_order = (
+            df.groupby("feature_clean")["MCC"]
+            .median()
+            .sort_values(ascending=False)
+            .index.tolist()
+        )
+
+    # ── Resolve palette ──────────────────────────────────────────────────────
+    # Priority: explicit color_map arg → auto-imported FEATURE_COLOR_MAP → seaborn Set2
+    _cmap = color_map
+    if _cmap is None and _HAS_COLOR_MAP:
+        _cmap = FEATURE_COLOR_MAP
+
+    if _cmap:
+        palette = [_cmap.get(f, "#9e9e9e") for f in feature_order]
+    else:
+        palette = "Set2"
+    # ─────────────────────────────────────────────────────────────────────────
 
     n_metrics = len(metrics)
     fig, axes = plt.subplots(1, n_metrics, figsize=(5 * n_metrics, 5))
@@ -85,7 +123,7 @@ def plot_overall_performance(df: pd.DataFrame, metrics: list[str] = None) -> plt
             y=metric,
             order=feature_order,
             ax=ax,
-            palette="Set2",
+            palette=palette,
         )
         ax.set_xlabel("")
         ax.set_ylabel(metric.replace("_", " ").title())
@@ -110,7 +148,7 @@ def plot_overall_performance(df: pd.DataFrame, metrics: list[str] = None) -> plt
     axes[0].legend()
     plt.suptitle(
         f"Overall Performance (n={df['task_id'].nunique()} tasks, "
-        f"{df['fold'].max() + 1} folds each)",
+        f"max {df['fold'].max() } folds each)",#+ 1
         y=1.02,
         fontsize=12,
     )
@@ -1237,6 +1275,584 @@ def make_umaps_for_obsm(
     return adata
 
 
+def plot_lowdata_with_standard_std(
+    df_lowdata: pd.DataFrame,
+    df_standard: pd.DataFrame,
+    feature_order: list[str],
+    palette_dict: dict[str, str],
+    metrics: list[str] | str = ("MCC", "F1_macro"),
+    feature_col: str = "feature_clean",
+    full_data_label: int = 2048,
+    figsize_per_row: tuple[float, float] = (14, 6),
+    show_error: bool = True,
+    title_prefix: str | None = None,
+    errorbar_style: str = "band",   # "band" (fill_between) or "bar" (errorbar caps); ignored if show_error=False
+    save_path: str | None = None,
+    xticks: list[int] = [2, 4, 8, 16, 32, 64, 128, 256, 512, 1024],
+) -> plt.Figure:
+    """
+    Low-data performance curve + full-data reference, one row per metric --
+    matched to plot_lowdata_ranks_with_standard's current styling (GridSpec
+    spacing, font sizes, legend anchor, ax2 tick handling), plotting absolute
+    metric values instead of Friedman ranks.
+
+    Dataset-level means are computed first (folds/bootstraps averaged within
+    each dataset), then averaged again across datasets for the plotted line.
+
+    If you want to exclude specific n_per_class values from the plot (not
+    just from the tick labels), filter df_lowdata before calling, the same
+    way you'd filter ranks_df before plot_lowdata_ranks_with_standard --
+    xticks only controls which tick marks are drawn, not which data plots.
+
+    show_error: if True, shows +/-1 SD across dataset-level means, either as
+    a shaded band (errorbar_style="band") or as error bars at each point
+    (errorbar_style="bar"). If False, plots only the mean line/marker.
+    """
+    if isinstance(metrics, str):
+        metrics = [metrics]
+
+    n_metrics = len(metrics)
+    from matplotlib.gridspec import GridSpec
+
+    low = df_lowdata.copy()
+    standard = df_standard.copy()
+
+    fig = plt.figure(figsize=(figsize_per_row[0], figsize_per_row[1] * n_metrics))
+
+    gs = GridSpec(
+        n_metrics, 2,
+        figure=fig,
+        width_ratios=[3, 0.4],
+        wspace=0.05,
+        hspace=0.3,
+    )
+
+    legend_handles = None
+    legend_labels = None
+
+    for row_idx, metric in enumerate(metrics):
+        ax1 = fig.add_subplot(gs[row_idx, 0])
+        ax2 = fig.add_subplot(gs[row_idx, 1], sharey=ax1)
+
+        # --- Low-data: dataset-level mean first, then mean (+ optional SD) across datasets ---
+        low_dataset_summary = (
+            low.groupby(["dataset_id", feature_col, "n_per_class"])[metric]
+            .mean()
+            .reset_index()
+        )
+        low_summary = (
+            low_dataset_summary
+            .groupby([feature_col, "n_per_class"])[metric]
+            .agg(mean="mean", std="std")
+            .reset_index()
+        )
+
+        for feat in feature_order:
+            d = low_summary[low_summary[feature_col] == feat].sort_values("n_per_class")
+            if d.empty:
+                continue
+            color = palette_dict.get(feat, "#555555")
+
+            ax1.plot(d["n_per_class"], d["mean"],
+                      color=color, marker="o", markersize=4,
+                      linewidth=1.5, label=feat)
+
+            if show_error:
+                if errorbar_style == "band":
+                    ax1.fill_between(
+                        d["n_per_class"], d["mean"] - d["std"], d["mean"] + d["std"],
+                        color=color, alpha=0.15, linewidth=0,
+                    )
+                elif errorbar_style == "bar":
+                    ax1.errorbar(
+                        d["n_per_class"], d["mean"], yerr=d["std"],
+                        fmt="none", ecolor=color, elinewidth=1, capsize=3, alpha=0.6,
+                    )
+                else:
+                    raise ValueError("errorbar_style must be 'band' or 'bar'")
+
+        ax1.set_xscale("log", base=2)
+        ax1.set_xticks(xticks)
+        ax1.set_xticklabels(xticks, fontsize=15)
+        ax1.set_xlabel("Training samples per class" if row_idx == n_metrics - 1 else "", fontsize=16)
+        ax1.tick_params(axis="y", labelsize=15)
+        ax1.set_ylabel(metric, fontsize=16)
+        ax1.grid(False)
+        ax1.spines["right"].set_visible(False)
+        
+
+        if legend_handles is None:
+            legend_handles, legend_labels = ax1.get_legend_handles_labels()
+
+        # --- Standard/full-data: same dataset-level aggregation ---
+        standard_dataset_summary = (
+            standard.groupby(["dataset_id", feature_col])[metric]
+            .mean()
+            .reset_index()
+        )
+        standard_summary = (
+            standard_dataset_summary
+            .groupby(feature_col)[metric]
+            .agg(mean="mean", std="std")
+            .reset_index()
+        )
+
+        for feat in feature_order:
+            row = standard_summary[standard_summary[feature_col] == feat]
+            if row.empty:
+                continue
+            color = palette_dict.get(feat, "#555555")
+            mean = row["mean"].iloc[0]
+
+            if show_error:
+                std = row["std"].iloc[0]
+                ax2.errorbar(
+                    full_data_label, mean, yerr=std,
+                    fmt="_", markersize=30, color=color,
+                    linewidth=1, capsize=5, capthick=1,
+                )
+            else:
+                ax2.plot(full_data_label, mean,
+                          marker="_", markersize=30, color=color, linewidth=2)
+
+        ax2.set_xticks([full_data_label])
+        ax2.set_xticklabels(["Full\nData"], fontsize=16)
+        ax2.set_xlabel("")
+        ax2.tick_params(
+            axis="y",
+            left=False,
+            right=False,
+            labelleft=False,
+            labelright=False,
+        )
+        ax2.grid(False)
+        ax2.spines["left"].set_visible(False)
+
+        # Broken-axis markers
+        kwargs = dict(marker=[(-1, -1), (1, 1)], markersize=12,
+                      linestyle="none", color="k", mec="k", mew=1, clip_on=False)
+        ax1.plot([1, 1], [0, 1], transform=ax1.transAxes, **kwargs)
+        ax2.plot([0, 0], [0, 1], transform=ax2.transAxes, **kwargs)
+
+    fig.legend(
+        legend_handles, legend_labels,
+        bbox_to_anchor=(1.0, 0.5),
+        bbox_transform=ax2.transAxes,
+        loc="center left",
+        borderaxespad=1.0,
+    )
+
+    title = f"{title_prefix} Low-data and full-data performance"
+    #title += " (mean \u00b1 SD across datasets)" if show_error else " (mean across datasets)"
+    fig.suptitle(title, y=1.02, fontsize=19)
+
+    fig.subplots_adjust(right=0.82, wspace=0.05, hspace=0.3)
+
+    if save_path:
+        fig.savefig(save_path, dpi=300, bbox_inches="tight")
+        print(f"Saved: {save_path}")
+
+    return fig
+
+def add_task_zscore(
+    df,
+    metrics=("MCC", "F1_macro"),
+    task_cols=("task_id",),
+    feature_col="feature_clean",
+):
+    """
+    Standard:
+        task_cols=("task_id",)
+
+    Low-data:
+        task_cols=("task_id", "n_per_class")
+    """
+
+    if isinstance(metrics, str):
+        metrics = [metrics]
+
+    task_cols = list(task_cols)
+
+    out = (
+        df.groupby(task_cols + [feature_col])[list(metrics)]
+        .mean()
+        .reset_index()
+    )
+
+    for metric in metrics:
+        stats = (
+            out.groupby(task_cols)[metric]
+            .agg(task_mean="mean", task_std="std")
+            .reset_index()
+        )
+
+        out = out.merge(stats, on=task_cols)
+
+        out[f"{metric}_z"] = (
+            out[metric] - out["task_mean"]
+        ) / out["task_std"]
+
+        out = out.drop(columns=["task_mean", "task_std"])
+
+    return out
+
+def plot_overall_performance_bar(
+    df,
+    metrics=("MCC_z", "F1_macro_z"),
+    feature_order=None,
+    color_map=None,
+    figsize=(9, 6),
+    title="Overall Performance (Task-Normalized Z-Score)",
+    xlabel="Task-Normalized Z-Score",
+    bar_height=0.36,
+    show_values=False,
+    errorbar=None,   # None, "std", "sem", "ci95"
+):
+    if isinstance(metrics, str):
+        metrics = [metrics]
+
+    if len(metrics) != 2:
+        raise ValueError(
+            "This function expects exactly two metrics, e.g. "
+            "('MCC_z', 'F1_macro_z')."
+        )
+
+    metric1, metric2 = metrics
+
+    task_summary = (
+        df.groupby(["task_id", "feature_clean"])[list(metrics)]
+        .mean()
+        .reset_index()
+    )
+
+    summary = (
+        task_summary
+        .groupby("feature_clean")[list(metrics)]
+        .agg(["mean", "std", "count"])
+    )
+
+    if feature_order is not None:
+        summary = summary.reindex(feature_order)
+
+    y = np.arange(len(summary))
+
+    colors = [
+        color_map.get(f, "#999999") if color_map is not None else "#999999"
+        for f in summary.index
+    ]
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    for metric, offset, hatch, alpha in [
+        (metric1, +bar_height / 2, None, 1.0),
+        (metric2, -bar_height / 2, "//", 0.65),
+    ]:
+        mean = summary[(metric, "mean")]
+
+        if errorbar is None:
+            err = None
+        elif errorbar == "std":
+            err = summary[(metric, "std")]
+        elif errorbar == "sem":
+            err = summary[(metric, "std")] / np.sqrt(summary[(metric, "count")])
+        elif errorbar == "ci95":
+            err = (
+                1.96
+                * summary[(metric, "std")]
+                / np.sqrt(summary[(metric, "count")])
+            )
+        else:
+            raise ValueError("errorbar must be one of: None, 'std', 'sem', 'ci95'")
+
+        ax.barh(
+            y + offset,
+            mean,
+            xerr=err,
+            height=bar_height,
+            color=colors,
+            edgecolor="black",
+            linewidth=0.8,
+            hatch=hatch,
+            alpha=alpha,
+            capsize=3,
+            label=metric,
+        )
+
+        if show_values:
+            for i, value in enumerate(mean):
+                if pd.isna(value):
+                    continue
+                # Place text inside the bar, away from the error bar at the tip
+                ha = "right" if value >= 0 else "left"
+                offset_text = -0.005 if value >= 0 else 0.05
+                ax.text(
+                    value + offset_text,
+                    y[i] + offset + 0.01,  # ← add 0.15 (adjust up/down to taste)
+                    f"{value:.2f}",
+                    va="bottom",            # ← change to "bottom" so text sits above
+                    ha=ha,
+                    fontsize=8,
+                )
+
+    ax.axvline(0, color="black", linestyle="--", linewidth=1)
+
+    ax.set_yticks(y)
+    ax.set_yticklabels(summary.index)
+    
+    ax.tick_params(axis="x", labelsize=16)
+    ax.tick_params(axis="y", labelsize=18)
+    
+    ax.set_xlabel(xlabel, fontsize=20)
+    ax.set_ylabel("Model / Representation", fontsize=20)
+    ax.set_title(title, fontsize=21)
+
+    ax.legend(frameon=True)
+
+    plt.tight_layout()
+
+    return fig, ax, summary
+
+def plot_lowdata_with_standard_zscore(
+    df_lowdata,
+    df_standard,
+    feature_order,
+    palette_dict,
+    metrics=("MCC", "F1_macro"),
+    full_data_n=2048,
+    figsize=(14, 10),
+):
+    """
+    Low-data + full-data plot using article-style task z-scores.
+
+    At each task and n_per_class:
+        z = (model_metric - mean_across_models) / std_across_models
+
+    Meaning:
+        0 = average model within that task/n
+        positive = above field average
+        negative = below field average
+    """
+
+    if isinstance(metrics, str):
+        metrics = [metrics]
+
+    fig, axes = plt.subplots(
+        nrows=len(metrics),
+        ncols=2,
+        figsize=figsize,
+        sharex=False,
+        sharey="row",
+        width_ratios=(3, 0.5),
+    )
+
+    if len(metrics) == 1:
+        axes = np.array([axes])
+
+    legend_handles = None
+    legend_labels = None
+
+    for row_idx, metric in enumerate(metrics):
+        z_metric = f"{metric}_z"
+
+        low_z = add_task_zscore(
+            df_lowdata,
+            metrics=[metric],
+            task_cols=("task_id", "n_per_class"),
+        )
+        
+        standard_z = add_task_zscore(
+            df_standard,
+            metrics=[metric],
+            task_cols=("task_id",),
+        )
+        standard_z["n_per_class"] = full_data_n
+
+        ax1 = axes[row_idx, 0]
+        ax2 = axes[row_idx, 1]
+
+        sns.lineplot(
+            data=low_z,
+            x="n_per_class",
+            y=z_metric,
+            hue="feature_clean",
+            estimator="mean",
+            errorbar="sd",
+            hue_order=feature_order,
+            palette=palette_dict,
+            ax=ax1,
+        )
+
+        handles, labels = ax1.get_legend_handles_labels()
+        if legend_handles is None:
+            legend_handles = handles
+            legend_labels = labels
+
+        if ax1.legend_ is not None:
+            ax1.legend_.remove()
+
+        ax1.axhline(0, color="black", linestyle="--", linewidth=1)
+        ax1.set_xscale("log", base=2)
+        ax1.set_xticks([2, 4, 8, 16, 32, 64, 128, 256, 512, 1024])
+        ax1.set_xlabel("Training samples per class")
+        ax1.set_ylabel(f"{metric} z-score")
+        ax1.grid(False)
+
+        standard_summary = (
+            standard_z
+            .groupby("feature_clean")[z_metric]
+            .agg(mean="mean", std="std")
+            .reset_index()
+        )
+
+        for feature in feature_order:
+            row = standard_summary[
+                standard_summary["feature_clean"] == feature
+            ]
+
+            if row.empty:
+                continue
+
+            ax2.errorbar(
+                x=full_data_n,
+                y=row["mean"].iloc[0],
+                yerr=row["std"].iloc[0],
+                fmt="_",
+                markersize=30,
+                color=palette_dict.get(feature, "#555555"),
+                linewidth=1,
+                capsize=5,
+                capthick=1,
+            )
+
+        ax2.axhline(0, color="black", linestyle="--", linewidth=1)
+        ax2.set_xticks([full_data_n])
+        ax2.set_xticklabels(["Full\nData"])
+        ax2.set_xlabel("")
+        ax2.tick_params(axis="y", labelleft=False)
+        ax2.grid(False)
+
+        ax1.spines["right"].set_visible(False)
+        ax2.spines["left"].set_visible(False)
+        ax2.yaxis.tick_right()
+
+        kwargs = dict(
+            marker=[(-1, -1), (1, 1)],
+            markersize=12,
+            linestyle="none",
+            color="k",
+            mec="k",
+            mew=1,
+            clip_on=False,
+        )
+
+        ax1.plot([1, 1], [0, 1], transform=ax1.transAxes, **kwargs)
+        ax2.plot([0, 0], [0, 1], transform=ax2.transAxes, **kwargs)
+
+    fig.legend(
+        legend_handles,
+        legend_labels,
+        bbox_to_anchor=(1.05, 0.5),
+        loc="center left",
+    )
+
+    fig.suptitle(
+        "Low-data and full-data task-normalized performance",
+        y=1.02,
+        fontsize=12,
+    )
+
+    plt.tight_layout()
+    return fig
+
+def build_standard_mode_summary_table(
+    disease_full: pd.DataFrame,
+    celltype_full: pd.DataFrame,
+    metrics: list[str] = ("MCC", "F1_macro", "recall_macro", "balanced_acc"),
+    task_col_disease: str = "task_id",
+    task_col_celltype: str = "dataset_id",
+    feature_col: str = "feature_clean",
+    feature_order: list[str] | None = None,
+) -> dict[str, pd.DataFrame]:
+    """
+    Builds one summary table PER BENCHMARK (Disease, Cell type), with rows =
+    metric (MCC, F1_macro, recall_macro, balanced_acc) and columns = model.
+    Folds are averaged to one score per task first (matching every other
+    analysis in this project), then mean/SD are taken across tasks (disease)
+    or datasets (cell-type). Cell values are "mean ± sd" strings (no sample
+    size shown).
+
+    Args:
+        feature_order: Column order for the output table. If None, columns
+                       come out in whatever order groupby returns
+                       (alphabetical) -- pass e.g. the same list used to
+                       order your Friedman rank figures, or
+                       ["Raw Log-norm", "PCA-50", "TF-SAPIENS", "BMFM_CONCAT",
+                        "GENEFORMER", "SCVI", "random_proj50"] for a
+                       best-to-worst layout matching the standard-mode ranks.
+
+    Returns a dict: {"Disease": DataFrame, "Cell type": DataFrame}, each with
+    rows = metric, columns = feature_clean (in feature_order if given).
+    """
+    tables = {}
+
+    for benchmark, df, task_col in [
+        ("Disease", disease_full, task_col_disease),
+        ("Cell type", celltype_full, task_col_celltype),
+    ]:
+        metric_rows = {}
+        for metric in metrics:
+            # Step 1: average across folds -> one score per (task, feature)
+            task_feature = (
+                df.groupby([task_col, feature_col])[metric]
+                .mean()
+                .reset_index()
+            )
+            # Step 2: mean/SD across tasks, per feature
+            summary = (
+                task_feature.groupby(feature_col)[metric]
+                .agg(["mean", "std"])
+            )
+            metric_rows[metric] = summary.apply(
+                lambda r: f"{r['mean']:.3f} \u00b1 {r['std']:.3f}",
+                axis=1,
+            )
+
+        table = pd.DataFrame(metric_rows).T  # rows = metric, columns = feature_clean
+
+        if feature_order is not None:
+            # Keep only columns that exist, in the requested order; append
+            # any leftover columns not in feature_order at the end so
+            # nothing silently disappears.
+            present = [f for f in feature_order if f in table.columns]
+            leftover = [f for f in table.columns if f not in feature_order]
+            table = table[present + leftover]
+
+        tables[benchmark] = table
+
+    return tables
+
+
+def tables_to_latex(tables: dict) -> dict[str, str]:
+    """
+    Converts each mean±sd string table (one per benchmark) to a LaTeX
+    tabular block, ready to paste into the manuscript. Uses \\pm instead of
+    the unicode ± symbol, since plain ± often breaks LaTeX compilation
+    depending on font/encoding.
+    """
+    latex_blocks = {}
+    for benchmark, table in tables.items():
+        table_latex_ready = table.copy()
+        for col in table_latex_ready.columns:
+            table_latex_ready[col] = table_latex_ready[col].str.replace(
+                "\u00b1", r"$\pm$", regex=False
+            )
+        latex_blocks[benchmark] = table_latex_ready.to_latex(
+            caption=f"Standard-mode performance, {benchmark} benchmark (mean $\\pm$ SD across "
+                    f"{'tasks' if benchmark == 'Disease' else 'datasets'}).",
+            label=f"tab:standard_{benchmark.lower().replace(' ', '_')}",
+            escape=False,
+        )
+    return latex_blocks
 # --- Usage ---
 # adata = sc.read_h5ad("your.h5ad")
 # make_umaps_for_obsm(
