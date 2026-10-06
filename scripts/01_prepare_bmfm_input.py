@@ -95,7 +95,7 @@ def collect_obs_from_cache(
         fpath = cache_dir / get_cache_filename(dataset_id, ct)
         if not fpath.exists():
             logger.warning(f"[{dataset_id}] Missing cache file: {fpath.name}")
-            return None
+            continue
         try:
             a = sc.read_h5ad(fpath, backed="r")
 
@@ -306,6 +306,8 @@ def parse_args():
                    help="Re-fetch even if output already exists")
     p.add_argument("--dry_run",           action="store_true",
                    help="Print what would be done, no writes")
+    p.add_argument("--dataset_ids", nargs="+", default=None,
+               help="Process only these dataset_ids (space-separated)")
     return p.parse_args()
 
 
@@ -321,6 +323,18 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     tasks_df = pd.read_parquet(args.celltype_manifest)
+    # Support both manifest shapes:
+    #  - celltype manifest: one row per dataset, cell_type is a list
+    #  - disease manifest:   one row per (dataset_id, cell_type), cell_type is a string
+    if tasks_df["cell_type"].apply(lambda x: isinstance(x, str)).all():
+        logger.info("Detected per-(dataset,celltype) manifest format - grouping by dataset_id")
+        tasks_df = (
+            tasks_df.groupby("dataset_id")["cell_type"]
+            .apply(list)
+            .reset_index()
+        ) 
+    if args.dataset_ids:
+    	tasks_df = tasks_df[tasks_df["dataset_id"].isin(args.dataset_ids)]
     if args.task_limit:
         tasks_df = tasks_df.head(args.task_limit)
 

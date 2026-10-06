@@ -253,6 +253,17 @@ def main():
 
     cache_dir = Path(args.cache_dir)
     tasks_df  = pd.read_parquet(args.celltype_manifest)
+    # Support both manifest shapes:
+    #  - celltype manifest: one row per dataset, cell_type is a list
+    #  - disease manifest:   one row per (dataset_id, cell_type), cell_type is a string
+    if tasks_df["cell_type"].apply(lambda x: isinstance(x, str)).all():
+        logger.info("Detected per-(dataset,celltype) manifest format - grouping by dataset_id")
+        tasks_df = (
+            tasks_df.groupby("dataset_id")["cell_type"]
+            .apply(list)
+            .reset_index()
+        )
+
     if args.task_limit:
         tasks_df = tasks_df.head(args.task_limit)
 
