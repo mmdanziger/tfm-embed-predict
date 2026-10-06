@@ -557,7 +557,7 @@ def main():
     ap.add_argument(
         "--embeddings",
         nargs="+",
-        default=["scvi", "geneformer", "tf-sapiens", "tf-exemplar-human", "bmfm"],
+        default=None,
         help="Embedding keys",
     )
 
@@ -647,10 +647,35 @@ def main():
         '9dbab10c-118d-496b-966a-67f1763a6b7d',
 
     ]
-    tasks_df = tasks_df[~tasks_df["dataset_id"].isin(LARGE_DATASET_IDS)].reset_index(drop=True)
-    logger.info(f"Excluded {len(LARGE_DATASET_IDS)} large datasets (will run separately)")
-    #tasks_df = tasks_df[tasks_df["dataset_id"].isin(LARGE_DATASET_IDS)].reset_index(drop=True)
-    #logger.info(f"Only {len(LARGE_DATASET_IDS)} large datasets ")
+    DATASET_IDS = [
+             '07760522-707a-4a1c-8891-dbd1226d6b27',
+             '13b61a7d-5605-4948-ba48-02c588960143',
+             '251b1a7e-d050-4486-8d50-4c2619eb0f46',
+             '2856d06c-0ff9-4e01-bfc9-202b74d0b60f',
+             '3966ba97-beb8-4d0b-9954-d3775cd2cd61',
+             '4dd1cd23-fc4d-4fd1-9709-602540f3ca6f',
+             '576f193c-75d0-4a11-bd25-8676587e6dc2',
+             '5829c7ba-697f-418e-8b98-d605b192dc48',
+             '6a270451-b4d9-43e0-aa89-e33aac1ac74b',
+             '7bb64315-9e5a-41b9-9235-59acf9642a3e',
+             '85c60876-7f35-40c5-a256-7808d84c6ba5',
+             '9813a1d4-d107-459e-9b2e-7687be935f69',
+             'a19d1667-a7b5-4556-9e5f-f9bfa690c0f1',
+             'a1b9c51e-a408-4f7f-bccb-abefe20ae2a5',
+             'e40c6272-af77-4a10-9385-62a398884f27',
+             'f5be4b96-f5a3-4c3d-84ac-6f69daf744d5',
+             'f8d8b443-bca6-4c3c-9042-669dfb7f8030'
+         ]
+
+
+    #tasks_df = tasks_df[~tasks_df["dataset_id"].isin(LARGE_DATASET_IDS)].reset_index(drop=True)
+    #logger.info(f"Excluded {len(LARGE_DATASET_IDS)} large datasets (will run separately)")
+    tasks_df = tasks_df[tasks_df["dataset_id"].isin(LARGE_DATASET_IDS)].reset_index(drop=True)
+    logger.info(f"Only {len(LARGE_DATASET_IDS)} large datasets ")
+
+    #tasks_df = tasks_df[tasks_df["dataset_id"].isin(DATASET_IDS)].reset_index(drop=True)
+    #logger.info(f"Only {len(DATASET_IDS)} from _9 datasets ")
+
 
     logger.info("=" * 80)
     logger.info(f"CELLTYPE BENCHMARK - Mode: {args.mode.upper()}")
