@@ -88,7 +88,136 @@ def validate_task_feasibility(
 
     return True, "ok", stats
 
+def audit_fetch_tasks(
+    tasks_df,
+    census_uri,
+    census_version,
+    embeddings,
+    fetch_semaphore=2,
+    logger=None,
+):
 
+
+    if logger is None:
+        import logging
+        logger = logging.getLogger(__name__)
+
+    FETCH_SEMAPHORE = threading.Semaphore(fetch_semaphore)
+
+    rows = []
+
+    logger.info(f"[VALIDATOR] Running on {len(tasks_df)} tasks")
+
+    with cellxgene_census.open_soma(
+        uri=census_uri,
+        census_version=census_version,
+    ) as census:
+
+        for _, row in tqdm(tasks_df.iterrows(), total=len(tasks_df), desc="VALIDATING"):
+
+            dataset_id = row["dataset_id"]
+            cell_type = row["cell_type"]
+            task_id = f"{dataset_id}::{cell_type}"
+
+            try:
+                obs_filter = (
+                    f"is_primary_data==True "
+                    f"and dataset_id=='{dataset_id}' "
+                    f"and cell_type=='{cell_type}'"
+                )
+
+                with FETCH_SEMAPHORE:
+                    adata = cellxgene_census.get_anndata(
+                        census=census,
+                        organism="homo_sapiens",
+                        measurement_name="RNA",
+                        obs_value_filter=obs_filter,
+                        obs_column_names=[
+                            "dataset_id",
+                            "cell_type",
+                            "donor_id",
+                            "disease",
+                        ],
+                        obs_embeddings=embeddings,
+                    )
+
+                # -------------------------
+                # EMPTY DATASET
+                # -------------------------
+                if adata.n_obs == 0:
+                    rows.append({
+                        "task_id": task_id,
+                        "status": "skip",
+                        "reason": "no_cells",
+                        "n_cells": 0,
+                        "n_classes": 0,
+                        "n_donors": 0,
+                        "min_donors_per_class": 0,
+                    })
+                    continue
+
+                y = adata.obs["disease"].astype(str).values
+                donors = adata.obs["donor_id"].astype(str).values
+
+                n_cells = adata.n_obs
+                n_classes = len(set(y))
+                n_donors = len(set(donors))
+
+                donor_class = {}
+                for d, label in zip(donors, y):
+                    donor_class[d] = label
+
+                class_counts = Counter(donor_class.values())
+                min_donors = min(class_counts.values()) if class_counts else 0
+
+                # -------------------------
+                # FEASIBILITY CHECK
+                # -------------------------
+                if n_classes < 2:
+                    status, reason = "skip", "too_few_classes"
+                elif min_donors < 2:
+                    rare = [c for c, cnt in class_counts.items() if cnt < 2]
+                    status, reason = "skip", f"classes_with_lt2_donors:{rare}"
+                elif n_donors < 2:
+                    status, reason = "skip", "too_few_donors"
+                else:
+                    status, reason = "ok", None
+
+                rows.append({
+                    "task_id": task_id,
+                    "status": status,
+                    "reason": reason,
+                    "n_cells": n_cells,
+                    "n_classes": n_classes,
+                    "n_donors": n_donors,
+                    "min_donors_per_class": min_donors,
+                })
+
+                del adata
+                gc.collect()
+
+            except Exception as e:
+                rows.append({
+                    "task_id": task_id,
+                    "status": "error",
+                    "reason": f"{type(e).__name__}: {str(e)}",
+                    "n_cells": None,
+                    "n_classes": None,
+                    "n_donors": None,
+                    "min_donors_per_class": None,
+                })
+
+    df = pd.DataFrame(rows)
+
+    logger.info("\n[VALIDATION SUMMARY]")
+    logger.info(df["status"].value_counts().to_string())
+
+    if "reason" in df.columns:
+        logger.info("\n[TOP REASONS]")
+        logger.info(df["reason"].value_counts().head(20).to_string())
+
+    return df
+    
 # =============================================================================
 # PHASE 1: FETCH DATA
 # =============================================================================
@@ -509,7 +638,7 @@ def main():
     ap.add_argument("--tasks_manifest", required=True, help="Task manifest parquet")
     ap.add_argument("--out_parquet", required=True, help="Output results parquet")
     ap.add_argument("--log_file", default="benchmark_fast.log", help="Log file")
-
+    ap.add_argument("--audit_fetch", action="store_true")
     # Mode selection
     ap.add_argument(
         "--mode",
@@ -625,7 +754,8 @@ def main():
     completed_tasks = get_completed_tasks(
         temp_dir, retry_errors=not args.no_retry_errors
     )
-
+    
+    
     logger.info(f"{'=' * 70}")
     logger.info(f"FAST BENCHMARK - Mode: {args.mode.upper()}")
     logger.info(f"  Total tasks in manifest: {len(tasks_df)}")
@@ -680,6 +810,17 @@ def main():
     logger.info(f"  Already cached: {len(cached_paths)}")
     logger.info(f"  Need to fetch: {len(tasks_to_fetch)}")
 
+    if args.audit_fetch:
+        audit_fetch_tasks(
+            tasks_df=tasks_to_fetch,
+            census_uri=args.census_uri,
+            census_version=args.census_version,
+            embeddings=args.embeddings,
+            fetch_semaphore=args.fetch_semaphore,
+            logger=logger,
+        )
+        import sys
+        sys.exit(0)
     # Fetch missing tasks with SHARED Census connection
     if tasks_to_fetch:
         skip_results = []
